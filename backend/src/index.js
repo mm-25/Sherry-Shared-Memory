@@ -8,7 +8,7 @@ import {
   getSummary,
   listSummaries,
 } from "./memory-review.js";
-import { listConnections, searchMemory, upsertRetrievalPermission } from "./retrieval.js";
+import { ensureRetrievalPermission, getSensitivitySettings, listConnections, searchMemory, updateSensitivitySettings, upsertRetrievalPermission } from "./retrieval.js";
 import { activityFromEvents, conversationActivity, orderTranscriptEvents, transcriptCoverage } from "./conversation-activity.js";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
@@ -93,6 +93,7 @@ async function listConversations(workspaceId, env, fetchImpl) {
 const PERSONAL_MEMORY_TAG = "sherry:personal";
 const PERSONAL_ENTRY_TAG = "sherry:entry";
 const PERSONAL_CATEGORY_TAG = "sherry:category";
+const SENSITIVITY_CATEGORY_BY_NAME = new Map([["finance", "financial"], ["financial", "financial"], ["health", "health"], ["personal", "personal"]]);
 
 function personalTag(prefix, value) {
   return `${prefix}:${encodeURIComponent(value)}`;
@@ -132,7 +133,7 @@ function validatePersonalMemoryPayload(payload) {
     const name = typeof payload.name === "string" ? payload.name.trim() : "";
     const description = typeof payload.description === "string" ? payload.description.trim() : "";
     if (!name || name.length > 80 || description.length > 140) return null;
-    return { kind, title: name, content: description || "Custom personal memory category", tags: [PERSONAL_MEMORY_TAG, PERSONAL_CATEGORY_TAG] };
+    return { kind, title: name, content: description || "Custom personal memory category", tags: [PERSONAL_MEMORY_TAG, PERSONAL_CATEGORY_TAG, "sensitivity:personal"] };
   }
   if (kind === "entry") {
     const category = typeof payload.category === "string" ? payload.category.trim() : "";
@@ -140,7 +141,8 @@ function validatePersonalMemoryPayload(payload) {
     const label = typeof payload.label === "string" ? payload.label.trim() : "";
     const content = typeof payload.content === "string" ? payload.content.trim() : "";
     if (!category || category.length > 80 || !fieldKey || fieldKey.length > 160 || !label || label.length > 200 || !content || content.length > 30000) return null;
-    return { kind, title: label, content, tags: [PERSONAL_MEMORY_TAG, PERSONAL_ENTRY_TAG, personalTag("category", category), personalTag("field", fieldKey), payload.isCustom === true ? "custom:true" : "custom:false"] };
+    const sensitivity = SENSITIVITY_CATEGORY_BY_NAME.get(category.toLowerCase()) || "personal";
+    return { kind, title: label, content, tags: [PERSONAL_MEMORY_TAG, PERSONAL_ENTRY_TAG, personalTag("category", category), personalTag("field", fieldKey), payload.isCustom === true ? "custom:true" : "custom:false", `sensitivity:${sensitivity}`] };
   }
   return null;
 }
@@ -470,6 +472,25 @@ async function conversationDetail(workspaceId, conversationId, env, fetchImpl) {
   return { ...conversations[0], ...activityFromEvents(conversations[0], events), transcriptCoverage: transcriptCoverage(conversations[0], events), events: orderTranscriptEvents(events) };
 }
 
+async function conversationEventIdentities(workspaceId, conversationId, env, fetchImpl) {
+  const conversations = await supabaseJson(
+    `conversations?id=eq.${encodeURIComponent(conversationId)}&workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,provider,provider_conversation_id`,
+    env, fetchImpl
+  );
+  if (!conversations.length) return null;
+  const events = [];
+  const pageSize = 1000;
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await supabaseJson(
+      `conversation_events?conversation_id=eq.${encodeURIComponent(conversationId)}&workspace_id=eq.${encodeURIComponent(workspaceId)}&select=provider_message_id,role&order=id.asc&limit=${pageSize}&offset=${offset}`,
+      env, fetchImpl
+    );
+    events.push(...page);
+    if (page.length < pageSize) break;
+  }
+  return { conversation: conversations[0], events };
+}
+
 async function rewriteArchiveWithoutConversation(objectKey, providerConversationId, env) {
   const object = await env.RAW_MEMORY.get(objectKey);
   if (!object) return { deleted: false, missing: true, sha256: null, bytes: 0 };
@@ -650,6 +671,7 @@ export async function handleRequest(request, env, dependencies = {}) {
   }
 
   const conversationMatch = url.pathname.match(/^\/v1\/conversations\/([0-9a-f-]+)$/i);
+  const conversationIdentitiesMatch = url.pathname.match(/^\/v1\/conversations\/([0-9a-f-]+)\/event-identities$/i);
   const summaryMatch = url.pathname.match(/^\/v1\/summaries\/([0-9a-f-]+)$/i);
   const claimReviewMatch = url.pathname.match(/^\/v1\/memories\/([0-9a-f-]+)\/review$/i);
   const conflictResolveMatch = url.pathname.match(/^\/v1\/conflicts\/([0-9a-f-]+)\/resolve$/i);
@@ -659,12 +681,14 @@ export async function handleRequest(request, env, dependencies = {}) {
   const isSummariesRoute = url.pathname === "/v1/summaries";
   const isMemoriesRoute = url.pathname === "/v1/memories";
   const isRetrievalConnectionsRoute = url.pathname === "/v1/retrieval/connections";
+  const isSensitivityRoute = url.pathname === "/v1/retrieval/sensitivity";
   const isRetrievalTestRoute = url.pathname === "/v1/retrieval/test";
   const isDiagnosticsRoute = url.pathname === "/v1/diagnostics/status";
   const isDashboardRoute = url.pathname === "/v1/dashboard";
   const isPersonalMemoryRoute = url.pathname === "/v1/personal-memory";
   const isMemoryRoute = url.pathname === "/v1/conversations"
     || Boolean(conversationMatch)
+    || Boolean(conversationIdentitiesMatch)
     || isSettingsRoute
     || isSummaryRunRoute
     || isSummariesRoute
@@ -673,6 +697,7 @@ export async function handleRequest(request, env, dependencies = {}) {
     || Boolean(claimReviewMatch)
     || Boolean(conflictResolveMatch)
     || isRetrievalConnectionsRoute
+    || isSensitivityRoute
     || isRetrievalTestRoute
     || isDiagnosticsRoute
     || isDashboardRoute;
@@ -745,9 +770,17 @@ export async function handleRequest(request, env, dependencies = {}) {
       }
       if (request.method === "GET" && isRetrievalConnectionsRoute) {
         for (const provider of ["chatgpt", "claude", "gemini", "grok", "web_test"]) {
-          await upsertRetrievalPermission({ userId: user.id, workspaceId, provider, readEnabled: true, writeNotesEnabled: provider === "web_test" }, env, fetchImpl);
+          await ensureRetrievalPermission({ userId: user.id, workspaceId, provider }, env, fetchImpl);
         }
         return jsonResponse({ connections: await listConnections({ userId: user.id, workspaceId }, env, fetchImpl) }, 200, cors);
+      }
+      if (request.method === "GET" && isSensitivityRoute) {
+        return jsonResponse({ settings: await getSensitivitySettings(workspaceId, env, fetchImpl) }, 200, cors);
+      }
+      if (request.method === "PUT" && isSensitivityRoute) {
+        const parsed = await boundedJson(request, 4096);
+        if (parsed.error) return apiError("invalid_request", "Sensitivity settings must be valid JSON under 4 KB.", 400, requestId, cors);
+        return jsonResponse({ settings: await updateSensitivitySettings(workspaceId, parsed.value, env, fetchImpl) }, 200, cors);
       }
       if (request.method === "PUT" && isRetrievalConnectionsRoute) {
         const parsed = await boundedJson(request, 4096);
@@ -761,7 +794,7 @@ export async function handleRequest(request, env, dependencies = {}) {
         if (parsed.error) return apiError("invalid_request", "The retrieval test must be valid JSON under 4 KB.", 400, requestId, cors);
         const query = typeof parsed.value.query === "string" ? parsed.value.query.trim() : "";
         if (!query || query.length > 500) return apiError("invalid_query", "Enter a query between 1 and 500 characters.", 422, requestId, cors);
-        await upsertRetrievalPermission({ userId: user.id, workspaceId, provider: "web_test", readEnabled: true, writeNotesEnabled: true }, env, fetchImpl);
+        await ensureRetrievalPermission({ userId: user.id, workspaceId, provider: "web_test" }, env, fetchImpl);
         return jsonResponse(await searchMemory({ userId: user.id, workspaceId, provider: "web_test", query, maxCharacters: 10000, toolName: "memory.web_test" }, env, fetchImpl), 200, cors);
       }
       if (request.method === "GET" && url.pathname === "/v1/conversations") {
@@ -770,6 +803,10 @@ export async function handleRequest(request, env, dependencies = {}) {
       if (request.method === "GET" && conversationMatch) {
         const detail = await conversationDetail(workspaceId, conversationMatch[1], env, fetchImpl);
         return detail ? jsonResponse({ conversation: detail }, 200, cors) : apiError("not_found", "Conversation not found.", 404, requestId, cors);
+      }
+      if (request.method === "GET" && conversationIdentitiesMatch) {
+        const identities = await conversationEventIdentities(workspaceId, conversationIdentitiesMatch[1], env, fetchImpl);
+        return identities ? jsonResponse(identities, 200, cors) : apiError("not_found", "Conversation not found.", 404, requestId, cors);
       }
       if (request.method === "DELETE" && conversationMatch) {
         const result = await deleteConversation(workspaceId, conversationMatch[1], env, fetchImpl);

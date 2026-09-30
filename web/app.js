@@ -21,6 +21,7 @@ let extensionStatusData = null;
 let pendingClaudeImport = null;
 let selectedSummary = null;
 let retrievalConnections = null;
+let sensitivitySettings = null;
 let personalMemoryEntries = [];
 let personalMemoryCustomCategories = [];
 let bootDataAlerts = [];
@@ -702,6 +703,7 @@ function showView(name) {
   if (showSummaries) renderPersonalMemoryCategories();
   if (showSettings && !summarizerSettings) loadSettings();
   if (showSettings && !retrievalConnections) loadRetrievalConnections();
+  if (showSettings && !sensitivitySettings) loadSensitivitySettings();
   if (showSettings) requestAnimationFrame(updateSettingsNavActive);
   if (showDiagnostics) {
     loadDiagnostics();
@@ -755,6 +757,50 @@ function renderRetrievalConnections(items) {
 async function loadRetrievalConnections() {
   try { const data = await api(`/v1/retrieval/connections?workspaceId=${workspace.id}`); renderRetrievalConnections(data.connections); }
   catch (error) { $("retrievalConnections").textContent = `Connections could not load: ${error.message}`; }
+}
+function renderSensitivitySettings(settings) {
+  sensitivitySettings = settings;
+  for (const [category, id] of [["financial", "sensitivityFinancial"], ["health", "sensitivityHealth"], ["personal", "sensitivityPersonal"]]) {
+    const input = $(id);
+    if (input) {
+      input.checked = settings?.[`${category}_enabled`] === true;
+      input.disabled = !settings;
+    }
+  }
+}
+async function loadSensitivitySettings() {
+  renderSensitivitySettings(null);
+  try {
+    const data = await api(`/v1/retrieval/sensitivity?workspaceId=${workspace.id}`);
+    renderSensitivitySettings(data.settings);
+    $("sensitivityStatus").textContent = "";
+  } catch (error) {
+    renderSensitivitySettings(null);
+    if ($("sensitivityStatus")) $("sensitivityStatus").textContent = `Sensitivity controls could not load: ${error.message}`;
+  }
+}
+async function saveSensitivitySettings() {
+  if (!sensitivitySettings) return;
+  const settings = {
+    financial_enabled: $("sensitivityFinancial").checked,
+    health_enabled: $("sensitivityHealth").checked,
+    personal_enabled: $("sensitivityPersonal").checked
+  };
+  if (isPreview) {
+    renderSensitivitySettings({ ...sensitivitySettings, ...settings });
+    $("sensitivityStatus").textContent = "Preview setting updated locally.";
+    return;
+  }
+  try {
+    $("sensitivityStatus").textContent = "Saving…";
+    for (const id of ["sensitivityFinancial", "sensitivityHealth", "sensitivityPersonal"]) $(id).disabled = true;
+    const data = await api(`/v1/retrieval/sensitivity?workspaceId=${workspace.id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(settings) });
+    renderSensitivitySettings(data.settings);
+    $("sensitivityStatus").textContent = "Saved. Connected AI tools will not receive disabled categories or unlabelled memory while a category is off.";
+  } catch (error) {
+    renderSensitivitySettings(sensitivitySettings);
+    $("sensitivityStatus").textContent = `Could not save: ${error.message}`;
+  }
 }
 
 function extensionRuntime() {
@@ -1333,21 +1379,34 @@ async function importProviderHistory(event) {
       imported = provider === "chatgpt" ? normalizeChatGptExport(data) : normalizeGeminiExport(data);
     }
     if (!imported.length) throw new Error("No supported conversations were found in this file.");
+    SherryImportIntegrity.verifyImportPlan(imported);
     const importSessionId = `import:${crypto.randomUUID()}`;
     let messageCount = 0;
     for (let index = 0; index < imported.length; index += 1) {
       $("historyImportStatus").textContent = `Importing chat ${index + 1} of ${imported.length}…`;
       messageCount += await uploadImportedConversation(provider, imported[index], importSessionId);
     }
+    $("historyImportStatus").textContent = "Checking imported messages in Sherry…";
     const [conversationResponse, dashboardResponse] = await Promise.all([
       api(`/v1/conversations?workspaceId=${workspace.id}`),
       api(`/v1/dashboard?workspaceId=${workspace.id}`)
     ]);
     conversations = conversationResponse.conversations || [];
+    let readBackCount = 0;
+    for (const importedChat of imported) {
+      const matches = conversations.filter((chat) => chat.provider === provider && chat.provider_conversation_id === importedChat.id);
+      if (matches.length !== 1) throw new Error("Sherry could not find an imported chat in the cloud. Review the import before retrying.");
+      const identityRecord = await api(`/v1/conversations/${matches[0].id}/event-identities?workspaceId=${workspace.id}`);
+      if (identityRecord.conversation?.provider_conversation_id !== importedChat.id) {
+        throw new Error("Sherry found a different chat during cloud readback.");
+      }
+      readBackCount += SherryImportIntegrity.verifyReadback(importedChat.messages, identityRecord.events);
+    }
+    if (readBackCount !== messageCount) throw new Error("The imported message count did not match Sherry's cloud readback.");
     dashboardData = dashboardResponse;
     render();
     prepareExport();
-    $("historyImportStatus").textContent = `Cloud confirmed ${messageCount} message${messageCount === 1 ? "" : "s"} from ${imported.length} chat${imported.length === 1 ? "" : "s"}. File references were kept as metadata; file contents were not uploaded.`;
+    $("historyImportStatus").textContent = `Cloud confirmed and checked ${messageCount} message${messageCount === 1 ? "" : "s"} from ${imported.length} chat${imported.length === 1 ? "" : "s"}. File references were kept as metadata; file contents were not uploaded.`;
     $("historyImportFile").value = "";
     pendingClaudeImport = null;
     button.textContent = "Preview Claude import";
@@ -1401,6 +1460,7 @@ function bootPreview() {
     { provider: "claude", read_enabled: true, write_notes_enabled: true },
     { provider: "gemini", read_enabled: true, write_notes_enabled: false }
   ];
+  sensitivitySettings = { financial_enabled: true, health_enabled: true, personal_enabled: true };
   $("workspaceName").textContent = workspace.name;
   $("dashboardDataSource").classList.remove("hidden");
   $("memoryDataSource").classList.remove("hidden");
@@ -1414,6 +1474,7 @@ function bootPreview() {
   renderPersonalMemoryCategories();
   renderSettings(summarizerSettings);
   renderRetrievalConnections(retrievalConnections);
+  renderSensitivitySettings(sensitivitySettings);
   prepareExport();
   loadDiagnostics();
 }
@@ -2827,6 +2888,11 @@ $("summarizerForm").onsubmit=(event)=>{event.preventDefault();saveSettings(false
 $("runSummaryNow").onclick=runSummaryNow;
 $("removeApiKey").onclick=()=>{if(confirm("Remove the saved summarization API key? Automatic summaries will pause until a new key is saved.")) saveSettings(true);};
 $("retrievalTestForm").onsubmit=testRetrieval;
+[
+  ["sensitivityFinancial", "financial_enabled"],
+  ["sensitivityHealth", "health_enabled"],
+  ["sensitivityPersonal", "personal_enabled"]
+].forEach(([id]) => $(id).onchange=saveSensitivitySettings);
 $("copyMcpEndpoint").onclick=async()=>{await navigator.clipboard.writeText($("mcpEndpoint").value);$("copyMcpEndpoint").textContent="Copied";setTimeout(()=>$("copyMcpEndpoint").textContent="Copy address",1500);};
 ["extensionCaptureEnabled", "extensionCaptureAttachments", "extensionCaptureTemporary", "extensionDebugMode"].forEach((id)=>$(id).onchange=saveExtensionControls);
 $("extensionRefresh").onclick=loadExtensionStatus;

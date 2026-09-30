@@ -1,4 +1,5 @@
 const PROVIDERS = new Set(["chatgpt", "claude", "gemini", "grok", "generic", "web_test"]);
+const SENSITIVITY_CATEGORIES = ["financial", "health", "personal"];
 
 function secret(env) { return env.SUPABASE_SECRET_KEY || env.supabase_secret_key; }
 function headers(env, extra = {}) { return { apikey: secret(env), authorization: `Bearer ${secret(env)}`, ...extra }; }
@@ -13,6 +14,35 @@ async function digest(value) {
   return [...new Uint8Array(bytes)].map((item) => item.toString(16).padStart(2, "0")).join("");
 }
 function providerName(value) { return PROVIDERS.has(value) ? value : "generic"; }
+
+export async function getSensitivitySettings(workspaceId, env, fetchImpl = fetch) {
+  const rows = await db(`workspace_retrieval_settings?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=workspace_id,financial_enabled,health_enabled,personal_enabled`, env, fetchImpl);
+  if (rows.length !== 1) throw new Error("Workspace retrieval settings are unavailable.");
+  return rows[0];
+}
+
+export async function updateSensitivitySettings(workspaceId, values, env, fetchImpl = fetch) {
+  const record = {};
+  for (const category of SENSITIVITY_CATEGORIES) {
+    const key = `${category}_enabled`;
+    if (typeof values?.[key] !== "boolean") throw new Error(`A ${category} setting is required.`);
+    record[key] = values[key];
+  }
+  const rows = await db(`workspace_retrieval_settings?workspace_id=eq.${encodeURIComponent(workspaceId)}`, env, fetchImpl, {
+    method: "PATCH", headers: { "content-type": "application/json", prefer: "return=representation" }, body: JSON.stringify({ ...record, updated_at: new Date().toISOString() })
+  });
+  if (rows.length !== 1) throw new Error("Workspace retrieval settings were not saved.");
+  return rows[0];
+}
+
+function blockedBySensitivity(item, settings) {
+  const restricted = SENSITIVITY_CATEGORIES.some((category) => settings[`${category}_enabled`] === false);
+  if (!restricted) return false;
+  if (item.result_type !== "note") return true;
+  const tags = Array.isArray(item.metadata?.tags) ? item.metadata.tags : [];
+  if (!tags.some((tag) => SENSITIVITY_CATEGORIES.some((category) => tag === `sensitivity:${category}`))) return true;
+  return SENSITIVITY_CATEGORIES.some((category) => tags.includes(`sensitivity:${category}`) && settings[`${category}_enabled`] === false);
+}
 
 export async function getRetrievalPermission({ userId, workspaceId, provider }, env, fetchImpl = fetch) {
   const rows = await db(`retrieval_connections?workspace_id=eq.${workspaceId}&user_id=eq.${userId}&provider=eq.${providerName(provider)}&select=*`, env, fetchImpl);
@@ -40,6 +70,21 @@ export async function upsertRetrievalPermission(input, env, fetchImpl = fetch) {
     method: "POST", headers: { "content-type": "application/json", prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(record)
   });
   return rows[0];
+}
+
+export async function ensureRetrievalPermission(input, env, fetchImpl = fetch) {
+  const existing = await getRetrievalPermission(input, env, fetchImpl);
+  if (existing) return existing;
+  const record = {
+    workspace_id: input.workspaceId, user_id: input.userId, provider: providerName(input.provider),
+    client_id: input.clientId || null, client_name: input.clientName || null,
+    read_enabled: true, write_notes_enabled: input.provider === "web_test" || input.writeNotesEnabled === true,
+    scopes: input.provider === "web_test" || input.writeNotesEnabled === true ? ["memory:read", "memory:write"] : ["memory:read"]
+  };
+  const rows = await db("retrieval_connections?on_conflict=workspace_id,provider", env, fetchImpl, {
+    method: "POST", headers: { "content-type": "application/json", prefer: "resolution=ignore-duplicates,return=representation" }, body: JSON.stringify(record)
+  });
+  return rows[0] || getRetrievalPermission(input, env, fetchImpl);
 }
 
 async function audit(input, env, fetchImpl) {
@@ -79,7 +124,8 @@ export async function searchMemory(input, env, fetchImpl = fetch) {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ p_user_id: input.userId, p_workspace_id: input.workspaceId, p_query: query, p_limit: Math.min(input.limit || 12, 30) })
   });
-  const results = trimPacket((rows || []).filter((row) => row.result_type !== "claim"), Math.min(Math.max(input.maxCharacters || 10000, 1000), 20000));
+  const sensitivity = await getSensitivitySettings(input.workspaceId, env, fetchImpl);
+  const results = trimPacket((rows || []).filter((row) => row.result_type !== "claim" && !blockedBySensitivity(row, sensitivity)), Math.min(Math.max(input.maxCharacters || 10000, 1000), 20000));
   const cursorHealth = await db(`sync_cursors?workspace_id=eq.${input.workspaceId}&select=updated_at,gap_detected,backfill_required&order=updated_at.desc`, env, fetchImpl);
   const lastIndexedAt = cursorHealth?.[0]?.updated_at || null;
   const stale = (cursorHealth || []).some((cursor) => cursor.gap_detected || cursor.backfill_required);
@@ -109,6 +155,8 @@ export async function saveNote(input, env, fetchImpl = fetch) {
 
 export async function listProjects(input, env, fetchImpl = fetch) {
   await requireReadPermission(input, env, fetchImpl);
+  const settings = await getSensitivitySettings(input.workspaceId, env, fetchImpl);
+  if (SENSITIVITY_CATEGORIES.some((category) => settings[`${category}_enabled`] === false)) return [];
   return db(`projects?workspace_id=eq.${input.workspaceId}&select=id,name,description,is_default,updated_at&order=is_default.desc,name.asc`, env, fetchImpl);
 }
 
@@ -118,11 +166,19 @@ export async function listConnections(input, env, fetchImpl = fetch) {
 
 export async function getSource(input, env, fetchImpl = fetch) {
   await requireReadPermission(input, env, fetchImpl);
+  const settings = await getSensitivitySettings(input.workspaceId, env, fetchImpl);
+  const restricted = SENSITIVITY_CATEGORIES.some((category) => settings[`${category}_enabled`] === false);
+  if (restricted && input.type !== "note") return null;
   if (input.type === "excerpt") {
     const rows = await db(`text_chunks?id=eq.${encodeURIComponent(input.id)}&workspace_id=eq.${input.workspaceId}&select=id,content,source_event_id,conversation_id,conversation_events(role,sequence,message_timestamp,captured_at,source_url),conversations(title,provider,canonical_chat_url)`, env, fetchImpl);
     return rows[0] || null;
   }
   if (input.type === "summary") return (await db(`checkpoints?id=eq.${input.id}&workspace_id=eq.${input.workspaceId}&select=*`, env, fetchImpl))[0] || null;
-  if (input.type === "note") return (await db(`memory_notes?id=eq.${input.id}&workspace_id=eq.${input.workspaceId}&select=*`, env, fetchImpl))[0] || null;
+  if (input.type === "note") {
+    const note = (await db(`memory_notes?id=eq.${input.id}&workspace_id=eq.${input.workspaceId}&select=*`, env, fetchImpl))[0] || null;
+    if (!note) return null;
+    if (blockedBySensitivity({ result_type: "note", metadata: { tags: note.tags } }, settings)) return null;
+    return note;
+  }
   return null;
 }

@@ -80,6 +80,28 @@ test("retirement migration preserves old claims but blocks new claims and exclud
   }
 });
 
+test("sensitivity settings migration labels existing Personal Memory and creates workspace defaults", async () => {
+  const db = await migratedDatabase(false);
+  try {
+    await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
+    await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
+    await db.query(`insert into public.memory_notes (workspace_id, title, content, tags) values
+      ($1, 'Finance', 'Budget', array['sherry:personal', 'sherry:entry', 'category:Finance']::text[]),
+      ($1, 'Health', 'Allergy', array['sherry:personal', 'sherry:entry', 'category:Health']::text[]),
+      ($1, 'Travel', 'Window seat', array['sherry:personal', 'sherry:entry', 'category:Travel']::text[])`, [WORKSPACE_ID]);
+    const migration = await readFile(new URL("../supabase/migrations/20260930132205_gate_9_sensitivity_settings.sql", import.meta.url), "utf8");
+    await db.exec(migration);
+    const settings = await db.query("select financial_enabled, health_enabled, personal_enabled from public.workspace_retrieval_settings where workspace_id = $1", [WORKSPACE_ID]);
+    assert.deepEqual(settings.rows[0], { financial_enabled: true, health_enabled: true, personal_enabled: true });
+    const notes = await db.query("select title, tags from public.memory_notes where workspace_id = $1 order by title", [WORKSPACE_ID]);
+    assert.deepEqual(notes.rows.map((row) => [row.title, row.tags.find((tag) => tag.startsWith("sensitivity:"))]), [
+      ["Finance", "sensitivity:financial"], ["Health", "sensitivity:health"], ["Travel", "sensitivity:personal"]
+    ]);
+  } finally {
+    await db.close();
+  }
+});
+
 async function seedConversation(db, slug) {
   const source = await db.query(`insert into public.sources
     (workspace_id, provider, title) values ($1, 'chatgpt', 'ChatGPT')

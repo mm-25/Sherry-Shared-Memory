@@ -1,4 +1,4 @@
-import { upsertRetrievalPermission } from "./retrieval.js";
+import { ensureRetrievalPermission } from "./retrieval.js";
 
 function esc(value) { return String(value || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[c])); }
 function cookie(request, name) {
@@ -54,7 +54,7 @@ export function createDefaultHandler(appHandler) {
       const provider = inferProvider(client.clientName);
       const granted = authRequest.scope.filter((scope) => ["memory:read", "memory:write"].includes(scope));
       if (!granted.includes("memory:read")) granted.unshift("memory:read");
-      await upsertRetrievalPermission({ userId: user.id, workspaceId: workspaces[0].id, provider, clientId: client.clientId, clientName: client.clientName, readEnabled: true, writeNotesEnabled: granted.includes("memory:write") }, env);
+      await ensureRetrievalPermission({ userId: user.id, workspaceId: workspaces[0].id, provider, clientId: client.clientId, clientName: client.clientName, writeNotesEnabled: granted.includes("memory:write") }, env);
       const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
         request: authRequest, userId: user.id, scope: granted,
         props: { userId: user.id, workspaceId: workspaces[0].id, provider, scopes: granted },

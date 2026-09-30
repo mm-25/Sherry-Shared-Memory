@@ -84,7 +84,59 @@ test("an account cannot read or delete another workspace's conversation", async 
     ), configuredEnv(new MemoryR2()), { fetch });
     assert.equal(response.status, 403);
   }
+  const readback = await handleRequest(new Request(
+    `https://ingestion.example/v1/conversations/87e8367e-fc17-45ba-a4d7-13295c1d765b/event-identities?workspaceId=${WORKSPACE_ID}`,
+    { headers: { authorization: "Bearer user-session-token" } }
+  ), configuredEnv(new MemoryR2()), { fetch });
+  assert.equal(readback.status, 403);
   assert.equal(paths.some((path) => path.endsWith("/conversations")), false);
+});
+
+test("import readback returns only message identities for an owned chat", async () => {
+  const chatId = "87e8367e-fc17-45ba-a4d7-13295c1d765b";
+  const fetch = async (url) => {
+    const path = new URL(url).pathname;
+    if (path.endsWith("/auth/v1/user")) return Response.json({ id: USER_ID });
+    if (path.endsWith("/workspaces")) return Response.json([{ id: WORKSPACE_ID }]);
+    if (path.endsWith("/conversations")) return Response.json([{ id: chatId, provider: "chatgpt", provider_conversation_id: "source-chat" }]);
+    if (path.endsWith("/conversation_events")) return Response.json([{ provider_message_id: "message-one", role: "user" }]);
+    throw new Error(`Unexpected access: ${path}`);
+  };
+  const response = await handleRequest(new Request(
+    `https://ingestion.example/v1/conversations/${chatId}/event-identities?workspaceId=${WORKSPACE_ID}`,
+    { headers: { authorization: "Bearer user-session-token" } }
+  ), configuredEnv(new MemoryR2()), { fetch });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.events, [{ provider_message_id: "message-one", role: "user" }]);
+  assert.equal(JSON.stringify(body).includes("text_content"), false);
+});
+
+test("import readback includes messages beyond the database's first 1,000 rows", async () => {
+  const chatId = "87e8367e-fc17-45ba-a4d7-13295c1d765b";
+  const offsets = [];
+  const fetch = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith("/auth/v1/user")) return Response.json({ id: USER_ID });
+    if (parsed.pathname.endsWith("/workspaces")) return Response.json([{ id: WORKSPACE_ID }]);
+    if (parsed.pathname.endsWith("/conversations")) return Response.json([{ id: chatId, provider: "chatgpt", provider_conversation_id: "source-chat" }]);
+    if (parsed.pathname.endsWith("/conversation_events")) {
+      const offset = Number(parsed.searchParams.get("offset"));
+      offsets.push(offset);
+      return Response.json(offset === 0
+        ? Array.from({ length: 1000 }, (_, index) => ({ provider_message_id: `message-${index}`, role: "user" }))
+        : [{ provider_message_id: "message-1000", role: "assistant" }]);
+    }
+    throw new Error(`Unexpected access: ${parsed.pathname}`);
+  };
+  const response = await handleRequest(new Request(
+    `https://ingestion.example/v1/conversations/${chatId}/event-identities?workspaceId=${WORKSPACE_ID}`,
+    { headers: { authorization: "Bearer user-session-token" } }
+  ), configuredEnv(new MemoryR2()), { fetch });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.events.length, 1001);
+  assert.deepEqual(offsets, [0, 1000]);
 });
 
 test("conversation deletion removes its raw events from a shared R2 archive", async () => {

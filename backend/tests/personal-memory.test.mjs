@@ -87,7 +87,7 @@ test("creating a personal memory entry persists a user-authored tagged note", as
   assert.equal(response.status, 201);
   const insert = calls.find((call) => call.path === "/rest/v1/memory_notes" && call.method === "POST");
   assert.equal(insert.body.authority, "user_authored");
-  assert.deepEqual(insert.body.tags, ["sherry:personal", "sherry:entry", "category:Basic%20information", "field:default%3Aname", "custom:false"]);
+  assert.deepEqual(insert.body.tags, ["sherry:personal", "sherry:entry", "category:Basic%20information", "field:default%3Aname", "custom:false", "sensitivity:personal"]);
 });
 
 test("invalid personal memory payloads are rejected before database mutation", async () => {
