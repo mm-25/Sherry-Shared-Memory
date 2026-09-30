@@ -1,0 +1,26 @@
+.DS_Store
+**/.DS_Store
+
+# Local dependencies, generated builds, and tool state
+**/node_modules/
+**/dist/
+**/.wrangler/
+**/.temp/
+**/.cache/
+backend/worker-configuration.d.ts
+*.log
+
+# Local credentials (keep the documented examples)
+**/.env
+**/.env.*
+!**/.env.example
+**/.dev.vars
+!**/.dev.vars.example
+
+# Personal project records and unrelated local artifacts
+logs/
+audits/
+outputs/
+.codex-build-crossville-slide/
+.codex-finalizer/
+crossville-entryway-visual.png

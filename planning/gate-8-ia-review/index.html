@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sherry · Gate 8 information architecture review</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="clarity.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">S</span><span>Sherry <small>Product map</small></span></div>
+    <span class="draft-pill">Gate 8A · Review draft</span>
+  </header>
+
+  <main>
+    <div class="intro">
+      <p class="eyebrow">Current product + proposed next layers</p>
+      <h1>Decide how Sherry should be organized.</h1>
+      <p>This is a review of the product structure, not a list of features already approved for development. Each area explains what someone can do today, what breaks down, and the choice that would shape a future version. Select a card to read the reasoning and choose a direction.</p>
+      <div class="scope-note"><strong>Sequencing:</strong> Map and inventory now (8A/8B). Accessibility review is set aside. Product expansion (8C) waits until Gate 9; full validation (8D) waits until 8C.</div>
+    </div>
+
+    <nav class="tabs" aria-label="Review sections">
+      <button type="button" class="tab active" data-tab="map" aria-pressed="true">Sitemap</button>
+      <button type="button" class="tab" data-tab="flows" aria-pressed="false">User flows</button>
+      <button type="button" class="tab" data-tab="states" aria-pressed="false">State inventory</button>
+      <button type="button" class="tab" data-tab="review" aria-pressed="false">My review <span id="reviewCount">0</span></button>
+    </nav>
+
+    <section id="mapPanel" class="panel" aria-label="Sitemap">
+      <div class="section-bar"><div><p class="eyebrow">01 / Structure</p><h2>What exists, and what needs a home</h2></div><label class="switch"><input type="checkbox" id="showFuture" checked> Include proposed areas</label></div>
+      <div class="legend" aria-label="Status legend"><span><i class="dot live"></i>In app now</span><span><i class="dot partial"></i>Partial</span><span><i class="dot proposed"></i>Proposed / not built</span></div>
+      <p class="section-copy map-intro"><strong>Read the status first.</strong> “In app now” means the page or control exists, not that every edge case is solved. “Partial” means users can do some of the task, but an important part is missing. “Proposed” means we are deciding whether and where it belongs—nothing has been built or approved. The question on each card is the decision I need from you.</p>
+      <p class="section-copy map-intro"><strong>Suggested order:</strong> start with Chat Memory and Sources—should they be one place or two? Then look at Personal Memory versus AI-saved notes, followed by AI connections versus extension controls. Projects and Timeline can wait if their purpose is not yet convincing.</p>
+      <div id="map" class="map-grid"></div>
+      <p class="footnote">“Proposed” marks a review decision, not a committed route. The retired claim/conflict review is excluded from the active sitemap.</p>
+    </section>
+
+    <section id="flowsPanel" class="panel" aria-label="User flows" hidden>
+      <div class="section-bar"><div><p class="eyebrow">02 / Journeys</p><h2>How someone gets a task done</h2></div></div>
+      <p class="section-copy">Each path mixes working steps and proposed steps on purpose. Select a step to see what exists and the decision behind adding or changing it. “Missing today” explains where the experience currently stops.</p>
+      <div id="flowList" class="flow-list"></div>
+    </section>
+
+    <section id="statesPanel" class="panel" aria-label="State inventory" hidden>
+      <div class="section-bar"><div><p class="eyebrow">03 / Gate 8B</p><h2>What each flow must explain</h2></div></div>
+      <p class="section-copy">A state is a moment that needs its own explanation—for example, an upload waiting offline is different from an upload that failed. “Present” means some UI exists, not that the underlying behavior is proven. “Partial” means the explanation or recovery path is incomplete. “Not built” means there is no intentional experience yet. This is design inventory only; Gate 9 must verify the safety guarantees underneath it.</p>
+      <div class="state-filters" role="group" aria-label="Filter state inventory">
+        <button type="button" class="filter active" data-state-filter="all" aria-pressed="true">All</button>
+        <button type="button" class="filter" data-state-filter="covered" aria-pressed="false">Present</button>
+        <button type="button" class="filter" data-state-filter="partial" aria-pressed="false">Partial</button>
+        <button type="button" class="filter" data-state-filter="missing" aria-pressed="false">Not built</button>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Moment / surface</th><th>What the user needs to know or do</th><th>Current coverage</th><th>Next design question</th></tr></thead><tbody id="stateRows"></tbody></table></div>
+    </section>
+
+    <section id="reviewPanel" class="panel" aria-label="My review" hidden>
+      <div class="section-bar"><div><p class="eyebrow">04 / Decisions</p><h2>Your review queue</h2></div><button id="exportReview" class="button primary" type="button">Download my review</button></div>
+      <p class="section-copy">This collects the directions you chose, their priority, and your own notes. It stays in this browser until you download it and send it to me. Nothing here changes Sherry or starts Gate 8C work.</p>
+      <div id="reviewItems" class="review-items"></div>
+    </section>
+  </main>
+
+  <dialog id="detailDialog" aria-labelledby="detailTitle">
+    <div class="dialog-head"><span id="detailStatus" class="status"></span><button type="button" id="closeDetail" class="close" aria-label="Close details">×</button></div>
+    <h2 id="detailTitle"></h2>
+    <p id="detailSummary" class="detail-summary"></p>
+    <div class="detail-section"><h3>What someone can do today</h3><p id="detailNow"></p><p class="detail-location">Current location: <span id="detailLocation"></span></p></div>
+    <div class="detail-section"><h3>Why this is on the map</h3><p id="detailReason"></p></div>
+    <div class="detail-section"><h3>The decision to make</h3><p id="detailQuestion"></p><div id="detailOptions" class="option-list" role="group" aria-label="Possible directions"></div><p class="recommendation"><strong>My starting recommendation:</strong> <span id="detailRecommendation"></span></p></div>
+    <div class="detail-section planning-boundary"><h3>What this does not decide yet</h3><p id="detailNext"></p><p class="detail-location">Timing: <span id="detailGate"></span></p></div>
+    <div class="review-form"><h3>How important is this after Gate 9?</h3><p class="form-help">Choosing a direction above records the structure you prefer. Choose a priority here so I know what to address first when implementation resumes.</p><div class="choice-grid" role="group" aria-label="Implementation priority"><button type="button" data-choice="next">First in 8C</button><button type="button" data-choice="later">Later</button><button type="button" data-choice="not-needed">Not needed</button><button type="button" data-choice="unsure">Need more discussion</button></div><label for="reviewNote">What did I miss? You can suggest a different direction.</label><textarea id="reviewNote" rows="4" placeholder="For example: I want the source chat and its summaries together, but I do not want another sidebar page."></textarea><p id="saveStatus" role="status">Saved locally as you type.</p></div>
+  </dialog>
+</body>
+</html>

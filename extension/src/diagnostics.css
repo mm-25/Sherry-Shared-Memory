@@ -1,0 +1,61 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #1d2620;
+  background: #f3f0e9;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 44px 0 80px; }
+header { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+.eyebrow { color: #7c6338; font-size: 11px; font-weight: 800; letter-spacing: 0.16em; }
+h1 { margin: 7px 0 5px; font-size: clamp(32px, 5vw, 58px); letter-spacing: -0.055em; line-height: 0.95; }
+h2 { margin: 0; font-size: 18px; }
+p { margin: 0; color: #6f7771; line-height: 1.5; }
+.header-actions { display: flex; gap: 8px; }
+button { border: 0; border-radius: 10px; padding: 10px 15px; color: white; background: #233d2e; font: inherit; font-weight: 700; cursor: pointer; }
+button.secondary { color: #27322b; background: #ded8cd; }
+button:disabled { cursor: not-allowed; opacity: 0.5; }
+.notice { margin-bottom: 16px; padding: 13px 16px; border: 1px solid #d5c9b6; border-radius: 12px; color: #6f5428; background: #fbf3df; font-size: 13px; }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 10px; }
+.cards article { padding: 18px; border: 1px solid #ddd7cb; border-radius: 15px; background: #fffdf8; }
+.cards span, .cards strong { display: block; }
+.cards span { color: #727a74; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; }
+.cards strong { margin-top: 8px; font-size: 30px; letter-spacing: -0.04em; }
+.panel { margin-top: 10px; overflow: hidden; border: 1px solid #ddd7cb; border-radius: 16px; background: #fffdf8; }
+.panel-heading { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid #ebe6dd; }
+.panel-heading p { margin-top: 3px; font-size: 12px; }
+.pill { padding: 6px 10px; border-radius: 999px; color: #345441; background: #e3eee6; font-size: 11px; font-weight: 750; }
+.pill-error { color: #8f3029; background: #f8dfdc; }
+.sync-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 20px; }
+.sync-form label { display: grid; gap: 7px; color: #59615b; font-size: 12px; font-weight: 700; }
+.sync-form label:nth-child(3) { grid-column: 1 / -1; }
+.sync-form input[type="url"], .sync-form input[type="text"], .sync-form input[type="email"], .sync-form input[type="password"] { width: 100%; border: 1px solid #d8d1c5; border-radius: 10px; padding: 11px 12px; color: #202a23; background: #fff; font: inherit; font-weight: 500; }
+.sync-form input:focus { border-color: #6b8b76; outline: 3px solid #dfeae2; }
+.sync-form .checkbox-row { display: flex; grid-column: 1 / -1; align-items: center; gap: 9px; font-weight: 600; }
+.form-help, .form-message { grid-column: 1 / -1; font-size: 12px; }
+.form-message { min-height: 18px; color: #6f5428; }
+.form-actions { display: flex; grid-column: 1 / -1; flex-wrap: wrap; gap: 8px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { padding: 11px 20px; border-bottom: 1px solid #eee9e1; text-align: left; vertical-align: top; }
+th { color: #707771; background: #f8f5ef; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; }
+td code { white-space: pre-wrap; overflow-wrap: anywhere; color: #4d5650; }
+.status { font-weight: 750; }
+.status.ok { color: #39734c; }
+.status.error { color: #a6382d; }
+.status.skipped { color: #8b692d; }
+.events { display: grid; gap: 0; }
+.event { padding: 18px 20px; border-bottom: 1px solid #eee9e1; }
+.event:last-child { border-bottom: 0; }
+.event-meta { display: flex; flex-wrap: wrap; gap: 7px 12px; color: #717973; font-size: 11px; }
+.event-role { color: #294d37; font-weight: 800; text-transform: uppercase; }
+.event-text { margin-top: 8px; color: #263029; font-size: 13px; white-space: pre-wrap; }
+.empty { padding: 36px 20px; color: #7b827d; text-align: center; }
+@media (max-width: 760px) {
+  header { align-items: flex-start; flex-direction: column; }
+  .cards { grid-template-columns: repeat(2, 1fr); }
+  .sync-form { grid-template-columns: 1fr; }
+  .sync-form label:nth-child(3) { grid-column: auto; }
+}

@@ -1,0 +1,3 @@
+-- Replaced by the canonical search_memory_context definition in
+-- 20260916050023_gate_7_retrieval.sql. This version marker records the live
+-- rollout of precise-then-broad natural-language search.

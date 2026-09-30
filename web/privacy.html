@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy · Memory</title>
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    .privacy{max-width:760px;margin:0 auto}.privacy header{margin-bottom:40px}.privacy article{padding:32px}.privacy h2{margin:34px 0 10px}.privacy p,.privacy li{line-height:1.65}.privacy ul{padding-left:22px}.privacy .effective{color:#747871}
+  </style>
+</head>
+<body>
+  <main class="shell privacy">
+    <header><div><span class="eyebrow">MEMORY</span><h1>Privacy notice</h1><p class="effective">Effective September 17, 2026</p></div></header>
+    <article class="card">
+      <p>Sherry Capture is a private browser extension that copies supported AI conversations into your Sherry workspace so you can retrieve context across AI providers.</p>
+
+      <h2>What the extension handles</h2>
+      <ul>
+        <li>Visible user messages and AI responses on supported ChatGPT, Claude, and Gemini pages.</li>
+        <li>Conversation titles, page URLs, message order, timestamps, and links.</li>
+        <li>Attachment names and metadata when attachment capture is enabled.</li>
+        <li>Your Memory account email and authentication session.</li>
+        <li>Sensitive information—including health or financial information—when it appears in a captured conversation.</li>
+        <li>Limited technical information only when Firefox technical-data permission is enabled.</li>
+      </ul>
+      <p>Deleted messages and temporary chats are not intentionally collected by default. Attachment capture is off by default.</p>
+
+      <h2>Why the data is used</h2>
+      <p>Captured information is used only to provide your Memory workspace: durable conversation storage, summaries, reviewable memory claims, retrieval, source attribution, synchronization, diagnostics, deletion, and export.</p>
+
+      <h2>Where data is stored</h2>
+      <p>The extension sends captured data over HTTPS to the Memory ingestion service hosted on Cloudflare Workers. Raw archives are stored in a private Cloudflare R2 bucket. Structured workspace data and account authentication are hosted in Supabase.</p>
+      <p>Passwords, API keys, private keys, payment-card numbers, and certain labelled credentials found inside captured content are automatically redacted before durable storage. Your Memory account password is sent directly to Supabase for authentication and is not saved by the extension. Session tokens remain in your browser profile and are excluded from diagnostic exports.</p>
+
+      <h2>Your controls</h2>
+      <p>You can pause capture, control attachment and temporary-chat capture, disconnect cloud synchronization, inspect source conversations, export workspace data, and delete stored conversations or generated summaries. Disconnecting synchronization does not automatically delete data already stored in Memory.</p>
+
+      <h2>Sharing and retention</h2>
+      <p>Memory does not sell captured data or use it for advertising. Cloudflare, Supabase, and a user-selected summarization provider process data only as needed to provide the configured service. Data remains until you delete it or it is removed under the configured retention policy.</p>
+
+      <h2>Prototype status</h2>
+      <p>This is an unlisted prototype for private testing. Its privacy controls and storage design will be reviewed again before any public release.</p>
+    </article>
+  </main>
+</body>
+</html>

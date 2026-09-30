@@ -1,0 +1,50 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "shared-memory-ingestion",
+  "main": "src/worker-entry.js",
+  "compatibility_date": "2026-09-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.01
+    }
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "r2_buckets": [
+    {
+      "binding": "RAW_MEMORY",
+      "bucket_name": "shared-memory-raw"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "c022c0c9b0084444a229aabde6d3597a"
+    }
+  ],
+  "assets": {
+    "directory": "../web",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/v1/*", "/health", "/mcp", "/authorize", "/oauth/*", "/.well-known/*"]
+  },
+  "vars": {
+    "MAX_BATCH_BYTES": "524288",
+    "SUPABASE_URL": "https://zwpzmmfpgjaaikacoqas.supabase.co",
+    "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_mEtfpCKWHYDKARfWNNO5BA_ouWQWmfN",
+    "ALLOWED_ORIGINS": "chrome-extension://hooccdjkfnlghchnpomhijgdcblkgllj,null,http://localhost:8765,http://127.0.0.1:8765",
+    "ALLOW_FIREFOX_EXTENSION_ORIGINS": "true"
+  },
+  "secrets": {
+    "required": ["supabase_secret_key", "SETTINGS_ENCRYPTION_KEY"]
+  }
+}

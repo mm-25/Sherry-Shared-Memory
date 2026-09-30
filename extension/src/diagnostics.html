@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Shared Memory Diagnostics</title>
+    <link rel="stylesheet" href="diagnostics.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <span class="eyebrow">GATE 5 · CLOUD PIPELINE</span>
+          <h1>Capture diagnostics</h1>
+          <p>See exactly what each provider adapter detected and stored locally.</p>
+        </div>
+        <div class="header-actions">
+          <button id="refresh" type="button">Refresh</button>
+          <button id="export" class="secondary" type="button">Export JSON</button>
+        </div>
+      </header>
+
+      <section id="sync-notice" class="notice">
+        Cloud sync is not configured. Captured events remain in extension-local storage.
+      </section>
+
+      <section class="cards" aria-label="Capture totals">
+        <article><span>Stored events</span><strong id="total-events">0</strong></article>
+        <article><span>Streaming updates</span><strong id="updated-events">0</strong></article>
+        <article><span>Duplicates ignored</span><strong id="duplicate-events">0</strong></article>
+        <article><span>Diagnostic events</span><strong id="diagnostic-count">0</strong></article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div><h2>Test account</h2><p>Create or sign into a private test account without sharing credentials with us.</p></div>
+          <span id="sync-status" class="pill">Not connected</span>
+        </div>
+        <form id="auth-form" class="sync-form">
+          <label>
+            <span>Email</span>
+            <input id="auth-email" type="email" autocomplete="email" placeholder="you@example.com" required />
+          </label>
+          <label>
+            <span>Password</span>
+            <input id="auth-password" type="password" autocomplete="current-password" minlength="8" placeholder="At least 8 characters" required />
+          </label>
+          <p class="form-help">Your password is sent directly to Supabase over HTTPS and is never stored by this extension. The temporary session stays only in this browser profile.</p>
+          <p id="auth-message" class="form-message" role="status"></p>
+          <div class="form-actions">
+            <button id="create-account" type="button">Create test account</button>
+            <button id="sign-in" class="secondary" type="submit">Sign in and connect</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div><h2>Advanced cloud connection</h2><p>Automatically completed after test-account sign-in.</p></div>
+        </div>
+        <form id="sync-form" class="sync-form">
+          <label>
+            <span>Ingestion Worker URL</span>
+            <input id="sync-endpoint" type="url" placeholder="https://memory-ingestion.example.workers.dev" required />
+          </label>
+          <label>
+            <span>Workspace ID</span>
+            <input id="sync-workspace" type="text" placeholder="00000000-0000-4000-8000-000000000000" required />
+          </label>
+          <label>
+            <span>Supabase session access token</span>
+            <input id="sync-token" type="password" autocomplete="off" placeholder="Leave blank to keep the connected session" />
+          </label>
+          <label class="checkbox-row">
+            <input id="sync-backfill" type="checkbox" checked />
+            <span>Upload existing locally captured events as the first backfill</span>
+          </label>
+          <p class="form-help">These fields remain available for debugging. The access token is excluded from Diagnostics and JSON exports.</p>
+          <p id="sync-message" class="form-message" role="status"></p>
+          <div class="form-actions">
+            <button type="submit">Connect and sync</button>
+            <button id="reupload-existing" class="secondary" type="button">Re-upload existing</button>
+            <button id="retry-sync" class="secondary" type="button">Retry pending</button>
+            <button id="disconnect-sync" class="secondary" type="button">Disconnect</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div><h2>Pipeline activity</h2><p>Newest event first</p></div>
+          <span id="last-capture" class="pill">No captures yet</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>Stage</th><th>Status</th><th>Details</th></tr></thead>
+            <tbody id="diagnostic-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div><h2>Captured messages</h2><p>Text is shown here only for prototype verification.</p></div>
+        </div>
+        <div id="captured-events" class="events"></div>
+      </section>
+    </main>
+    <script src="diagnostics.js"></script>
+  </body>
+</html>

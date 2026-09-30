@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sherry Capture</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <span id="extension-version" class="eyebrow">SHERRY CAPTURE</span>
+        <h1>Sherry Capture</h1>
+        <p id="page-status">Checking this tab…</p>
+      </header>
+
+      <section class="control-row">
+        <div>
+          <strong>Automatic capture</strong>
+          <span>Visible ChatGPT, Claude, and Gemini messages</span>
+        </div>
+        <label class="switch">
+          <input id="capture-enabled" type="checkbox" />
+          <span aria-hidden="true"></span>
+        </label>
+      </section>
+
+      <section class="stats" aria-label="Capture statistics">
+        <div><span>Stored locally · all tools</span><strong id="event-count">0</strong></div>
+        <div><span>Last capture</span><strong id="last-capture">Never</strong></div>
+      </section>
+
+      <p id="sync-status" class="sync-status" role="status">Checking cloud sync…</p>
+      <p id="scan-status" class="sync-status" role="status">Checking this page’s scan…</p>
+
+      <p id="sync-alert" class="error" hidden></p>
+
+      <p id="error" class="error" hidden></p>
+
+      <div class="actions">
+        <button id="capture-now" type="button">Capture visible messages</button>
+        <button id="connect-sherry" class="secondary" type="button">Reconnect Sherry page</button>
+        <button id="open-diagnostics" class="secondary" type="button">Open diagnostics</button>
+      </div>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
