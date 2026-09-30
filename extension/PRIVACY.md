@@ -1,6 +1,6 @@
 # Sherry Capture privacy notice
 
-Effective date: September 17, 2026
+Updated: September 30, 2026
 
 Sherry Capture is a private browser-extension prototype that copies supported AI conversations into the user's Memory workspace so the user can retrieve context across AI providers.
 
@@ -19,17 +19,17 @@ The extension does not intentionally collect deleted messages or temporary chats
 
 ## Why the data is used
 
-Captured information is used only to provide the user's Memory workspace: durable conversation storage, summaries, user-reviewable memory claims, retrieval, source attribution, synchronization, diagnostics, deletion, and export.
+Captured information is used to provide the user's Sherry workspace: conversation storage, summaries, Personal Memory notes, retrieval, source attribution, synchronization, diagnostics, deletion, and export. Sherry no longer creates new automatic memory claims.
 
 ## Where data is sent and stored
 
 The extension sends captured data over HTTPS to the Memory ingestion service hosted on Cloudflare Workers. Raw archives are stored in a private Cloudflare R2 bucket. Structured workspace data and account authentication are hosted in Supabase.
 
-Passwords, API keys, private keys, payment-card numbers, and certain labelled credentials found inside captured content are automatically redacted by the ingestion service before durable storage. The Memory account password is sent directly to Supabase for authentication and is not saved by the extension. Session tokens are stored only in the browser profile and are excluded from diagnostic exports.
+The ingestion service looks for common password, API-key, private-key, payment-card, and labelled-credential patterns and replaces matches before durable storage. Automatic pattern matching may miss unfamiliar secret formats. The Sherry account password is sent directly to Supabase for authentication and is not saved by the extension. Session tokens are stored only in the browser profile and are excluded from diagnostic exports.
 
 ## User controls
 
-The user can pause capture, choose whether attachments and temporary chats are included, disconnect cloud synchronization, inspect captured conversations and their source links, export workspace data, and delete stored conversations or generated summaries. Disconnecting synchronization does not automatically delete data already stored in the Memory workspace.
+The user can pause capture, choose whether attachments and temporary chats are included, disconnect cloud synchronization, inspect captured conversations and their source links, export chats, summaries, and Personal Memory notes, and delete individual stored conversations. Financial, Health, and Personal switches keep stored information in Sherry but withhold disabled categories from connected AI tools. When any switch is off, unlabelled chats and summaries are also withheld from connected AI tools. Disconnecting synchronization does not delete data already stored in Sherry. Deleting an entire workspace or account is not yet available in the private prototype.
 
 ## Sharing and sale
 
@@ -37,7 +37,7 @@ Memory does not sell captured data and does not use it for advertising. Data is 
 
 ## Retention
 
-Captured data remains in the user's workspace until deleted by the user or removed under the workspace's configured retention policy. Extension-local diagnostic and capture records are bounded to prevent unlimited browser storage growth.
+Captured data remains in the user's workspace until deleted by the user. There is currently no automatic workspace retention setting. Extension-local diagnostic and capture records are bounded to prevent unlimited browser storage growth.
 
 ## Prototype status
 

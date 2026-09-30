@@ -269,6 +269,33 @@ test("migration executes and ingestion atomically creates searchable events and 
   }
 });
 
+test("archive index migration leaves legacy duplicate-only batches discoverable", async () => {
+  const db = await migratedDatabase();
+  try {
+    await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
+    await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
+    await db.exec("set role service_role");
+    const first = validBatch();
+    await callIngestion(db, first, `${WORKSPACE_ID}/chatgpt/2026/09/30/${first.batchId}.json`);
+    const duplicate = { ...first, batchId: "90000000-0000-4000-8000-000000000009" };
+    const receipt = await callIngestion(db, duplicate, `${WORKSPACE_ID}/chatgpt/2026/09/30/${duplicate.batchId}.json`, "b".repeat(64));
+    assert.equal(receipt.duplicates, 1);
+    await db.exec("reset role");
+    await db.exec(await readFile(new URL("../supabase/migrations/20260930184000_gate_9_archive_conversation_index.sql", import.meta.url), "utf8"));
+    const rows = await db.query("select batch_id, provider_conversation_ids from public.ingestion_batches order by id");
+    assert.deepEqual(rows.rows.map((row) => row.provider_conversation_ids), [[first.events[0].conversationId], null]);
+    await db.query("insert into public.deleted_conversations (workspace_id, provider, provider_conversation_id) values ($1, 'chatgpt', $2)", [WORKSPACE_ID, first.events[0].conversationId]);
+    await db.exec("set role service_role");
+    const late = { ...first, batchId: "90000000-0000-4000-8000-000000000010" };
+    await assert.rejects(
+      () => callIngestion(db, late, `${WORKSPACE_ID}/chatgpt/2026/09/30/${late.batchId}.json`, "c".repeat(64)),
+      /deleted_conversation_recapture_blocked/
+    );
+  } finally {
+    await db.close();
+  }
+});
+
 test("database transaction treats identical batches as replays and changed stream content as a revision", async () => {
   const db = await migratedDatabase();
   try {

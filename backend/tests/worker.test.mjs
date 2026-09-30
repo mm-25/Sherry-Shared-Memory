@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { handleRequest } from "../src/index.js";
+import { handleRequest, reconcileDeletedArchives } from "../src/index.js";
 import { BATCH_ID, MemoryR2, USER_ID, WORKSPACE_ID, configuredEnv, validBatch, validBatchV2 } from "./fixtures.mjs";
 
 function captureRequest(payload = validBatch(), headers = {}) {
@@ -27,6 +27,10 @@ function successfulFetch(spy = {}) {
       spy.rpcHeaders = options.headers;
       spy.rpcBody = JSON.parse(options.body);
       return Response.json({ status: "committed", received: 1, inserted: 1, updated: 0, duplicates: 0 });
+    }
+    if (url.includes("/rest/v1/ingestion_batches?") && options.method === "PATCH") {
+      spy.archiveIndex = JSON.parse(options.body);
+      return Response.json(null);
     }
     if (url.includes("/rest/v1/deleted_conversations?")) return Response.json(spy.deletedConversations || []);
     throw new Error(`Unexpected URL: ${url}`);
@@ -155,6 +159,7 @@ test("conversation deletion removes its raw events from a shared R2 archive", as
     if (path.endsWith("/workspaces")) return Response.json([{ id: WORKSPACE_ID }]);
     if (path.endsWith("/conversations") && !options.method) return Response.json([{ id: conversationId, provider: "chatgpt", provider_conversation_id: "remove-me" }]);
     if (path.endsWith("/conversation_events")) return Response.json([{ raw_object_key: key }]);
+    if (path.endsWith("/ingestion_batches") && !options.method) return Response.json([{ raw_object_key: key, provider_conversation_ids: ["remove-me", "keep-me"] }]);
     mutations.push({ path, method: options.method, body: options.body && JSON.parse(options.body) });
     return Response.json(null);
   };
@@ -167,6 +172,43 @@ test("conversation deletion removes its raw events from a shared R2 archive", as
   assert.equal(mutations.some((item) => item.path.endsWith("/deleted_conversations") && item.method === "POST"), true);
   assert.equal(mutations.some((item) => item.path.endsWith("/conversations") && item.method === "DELETE"), true);
   assert.equal(mutations.some((item) => item.path.endsWith("/ingestion_batches") && item.method === "PATCH" && item.body.payload_sha256), true);
+  assert.ok(mutations.findIndex((item) => item.path.endsWith("/deleted_conversations") && item.method === "POST")
+    < mutations.findIndex((item) => item.path.endsWith("/conversations") && item.method === "DELETE"));
+});
+
+test("deleting a conversation removes duplicate-only archives and leaves unrelated archives intact", async () => {
+  const r2 = new MemoryR2();
+  const conversationId = "87e8367e-fc17-45ba-a4d7-13295c1d765b";
+  const mainKey = `${WORKSPACE_ID}/chatgpt/main.json`;
+  const duplicateKey = `${WORKSPACE_ID}/chatgpt/duplicate.json`;
+  const unrelatedKey = `${WORKSPACE_ID}/chatgpt/unrelated.json`;
+  await r2.put(mainKey, JSON.stringify({ events: [{ conversationId: "remove-me", text: "original" }] }), {});
+  await r2.put(duplicateKey, JSON.stringify({ events: [{ conversationId: "remove-me", text: "duplicate" }] }), {});
+  await r2.put(unrelatedKey, JSON.stringify({ events: [{ conversationId: "other-chat", text: "keep" }] }), {});
+  const mutations = [];
+  const fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    if (path.endsWith("/auth/v1/user")) return Response.json({ id: USER_ID });
+    if (path.endsWith("/workspaces")) return Response.json([{ id: WORKSPACE_ID }]);
+    if (path.endsWith("/conversations") && !options.method) return Response.json([{ id: conversationId, provider: "chatgpt", provider_conversation_id: "remove-me" }]);
+    if (path.endsWith("/conversation_events")) return Response.json([{ raw_object_key: mainKey }]);
+    if (path.endsWith("/ingestion_batches") && !options.method) return Response.json([
+      { raw_object_key: mainKey, provider_conversation_ids: ["remove-me"] },
+      { raw_object_key: duplicateKey, provider_conversation_ids: null },
+      { raw_object_key: unrelatedKey, provider_conversation_ids: null }
+    ]);
+    mutations.push({ path, method: options.method, url });
+    return Response.json(null);
+  };
+  const response = await handleRequest(new Request(
+    `https://ingestion.example/v1/conversations/${conversationId}?workspaceId=${WORKSPACE_ID}`,
+    { method: "DELETE", headers: { authorization: "Bearer user-session-token" } }
+  ), configuredEnv(r2), { fetch });
+  assert.equal(response.status, 200);
+  assert.equal(await r2.get(mainKey), null);
+  assert.equal(await r2.get(duplicateKey), null);
+  assert.deepEqual((await (await r2.get(unrelatedKey)).json()).events, [{ conversationId: "other-chat", text: "keep" }]);
+  assert.equal(mutations.filter((item) => item.path.endsWith("/ingestion_batches") && item.method === "DELETE").length, 2);
 });
 
 test("deletion can finish when an earlier attempt already removed the raw archive", async () => {
@@ -178,6 +220,7 @@ test("deletion can finish when an earlier attempt already removed the raw archiv
     if (path.endsWith("/workspaces")) return Response.json([{ id: WORKSPACE_ID }]);
     if (path.endsWith("/conversations") && !options.method) return Response.json([{ id: conversationId, provider: "chatgpt", provider_conversation_id: "remove-me" }]);
     if (path.endsWith("/conversation_events")) return Response.json([{ raw_object_key: "already-deleted.json" }]);
+    if (path.endsWith("/ingestion_batches") && !options.method) return Response.json([{ raw_object_key: "already-deleted.json", provider_conversation_ids: null }]);
     mutations.push({ path, method: options.method });
     return Response.json(null);
   };
@@ -188,6 +231,55 @@ test("deletion can finish when an earlier attempt already removed the raw archiv
   assert.equal(response.status, 200);
   assert.equal(mutations.some((item) => item.path.endsWith("/conversations") && item.method === "DELETE"), true);
   assert.equal(mutations.some((item) => item.path.endsWith("/ingestion_batches")), false);
+});
+
+test("scheduled reconciliation removes a duplicate-only archive left by an earlier deletion", async () => {
+  const r2 = new MemoryR2();
+  const key = `${WORKSPACE_ID}/chatgpt/duplicate-left-behind.json`;
+  await r2.put(key, JSON.stringify({ events: [{ conversationId: "deleted-chat", text: "test data" }] }), {});
+  const mutations = [];
+  const fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    if (path.endsWith("/deleted_conversations") && !options.method) return Response.json([{
+      id: 17, workspace_id: WORKSPACE_ID, provider: "chatgpt", provider_conversation_id: "deleted-chat"
+    }]);
+    if (path.endsWith("/conversations") && !options.method) return Response.json([]);
+    if (path.endsWith("/ingestion_batches") && !options.method) return Response.json([{ raw_object_key: key, provider_conversation_ids: null }]);
+    mutations.push({ path, method: options.method });
+    return Response.json(null);
+  };
+  const result = await reconcileDeletedArchives(configuredEnv(r2), fetch);
+  assert.deepEqual(result, { checked: 1, reconciled: 1 });
+  assert.equal(await r2.get(key), null);
+  assert.equal(mutations.some((item) => item.path.endsWith("/ingestion_batches") && item.method === "DELETE"), true);
+  assert.equal(mutations.some((item) => item.path.endsWith("/deleted_conversations") && item.method === "PATCH"), true);
+});
+
+test("deletion reports pending cleanup when R2 fails after the tombstone and database removal", async () => {
+  const r2 = new MemoryR2();
+  const conversationId = "87e8367e-fc17-45ba-a4d7-13295c1d765b";
+  const key = `${WORKSPACE_ID}/chatgpt/cleanup-pending.json`;
+  await r2.put(key, JSON.stringify({ events: [{ conversationId: "remove-me" }] }), {});
+  r2.get = async () => { throw new Error("R2 temporarily unavailable"); };
+  const mutations = [];
+  const fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    if (path.endsWith("/auth/v1/user")) return Response.json({ id: USER_ID });
+    if (path.endsWith("/workspaces")) return Response.json([{ id: WORKSPACE_ID }]);
+    if (path.endsWith("/conversations") && !options.method) return Response.json([{ id: conversationId, provider: "chatgpt", provider_conversation_id: "remove-me" }]);
+    if (path.endsWith("/conversation_events")) return Response.json([{ raw_object_key: key }]);
+    if (path.endsWith("/ingestion_batches") && !options.method) return Response.json([{ raw_object_key: key, provider_conversation_ids: ["remove-me"] }]);
+    mutations.push({ path, method: options.method });
+    return Response.json(null);
+  };
+  const response = await handleRequest(new Request(
+    `https://ingestion.example/v1/conversations/${conversationId}?workspaceId=${WORKSPACE_ID}`,
+    { method: "DELETE", headers: { authorization: "Bearer user-session-token" } }
+  ), configuredEnv(r2), { fetch });
+  assert.equal(response.status, 202);
+  assert.equal((await response.json()).deleted.cleanupPending, true);
+  assert.deepEqual(mutations.filter((item) => item.method).map((item) => item.path.split("/").at(-1)),
+    ["deleted_conversations", "conversations"]);
 });
 
 test("does not re-import a conversation the user deleted", async () => {
@@ -219,6 +311,22 @@ test("redacts, archives, and commits a valid batch with separate public and secr
   assert.equal(spy.rpcBody.p_user_id, USER_ID);
   assert.equal(spy.rpcBody.p_batch_id, BATCH_ID);
   assert.equal(spy.rpcBody.p_events[0].text.includes("sk-ant-"), false);
+  assert.deepEqual(spy.archiveIndex.provider_conversation_ids, [payload.events[0].conversationId]);
+});
+
+test("an archive-index failure is retryable without losing the committed raw batch", async () => {
+  const r2 = new MemoryR2();
+  const normalFetch = successfulFetch();
+  const failingFetch = async (url, options = {}) =>
+    url.includes("/rest/v1/ingestion_batches?") && options.method === "PATCH"
+      ? Response.json({ error: "unavailable" }, { status: 503 })
+      : normalFetch(url, options);
+  const first = await handleRequest(captureRequest(), configuredEnv(r2), { fetch: failingFetch });
+  assert.equal(first.status, 503);
+  assert.equal(r2.objects.size, 1);
+  const second = await handleRequest(captureRequest(), configuredEnv(r2), { fetch: successfulFetch() });
+  assert.equal(second.status, 200);
+  assert.equal(r2.objects.size, 1);
 });
 
 test("archives Capture API v2 provenance and uses the v2 metadata transaction", async () => {

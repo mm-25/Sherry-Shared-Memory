@@ -3,6 +3,12 @@ const SUPABASE_KEY = "sb_publishable_mEtfpCKWHYDKARfWNNO5BA_ouWQWmfN";
 const WORKER_URL = "https://shared-memory-ingestion.mufaddal-m25.workers.dev";
 const EXTENSION_ID = "hooccdjkfnlghchnpomhijgdcblkgllj";
 const $ = (id) => document.getElementById(id);
+function setOriginalChatLink(link, sourceUrl) {
+  const valid = typeof sourceUrl === "string" && /^https:\/\//i.test(sourceUrl);
+  link.hidden = !valid;
+  if (valid) link.href = sourceUrl;
+  else link.removeAttribute("href");
+}
 const { messageTime, sort: sortedTranscriptEvents } = globalThis.SherryTranscriptOrder;
 const isPreview = new URLSearchParams(location.search).get("preview") === "1";
 const LOCAL_APP_HOSTS = new Set(["localhost", "127.0.0.1"]);
@@ -1362,6 +1368,7 @@ async function importProviderHistory(event) {
   }
   button.disabled = true;
   $("historyImportStatus").textContent = "Reading the export locally…";
+  let uploadStarted = false;
   try {
     if (provider === "claude" && (!pendingClaudeImport || pendingClaudeImport.file !== file)) {
       pendingClaudeImport = await previewClaudeImport(file);
@@ -1384,6 +1391,7 @@ async function importProviderHistory(event) {
     let messageCount = 0;
     for (let index = 0; index < imported.length; index += 1) {
       $("historyImportStatus").textContent = `Importing chat ${index + 1} of ${imported.length}…`;
+      uploadStarted = true;
       messageCount += await uploadImportedConversation(provider, imported[index], importSessionId);
     }
     $("historyImportStatus").textContent = "Checking imported messages in Sherry…";
@@ -1406,12 +1414,17 @@ async function importProviderHistory(event) {
     dashboardData = dashboardResponse;
     render();
     prepareExport();
-    $("historyImportStatus").textContent = `Cloud confirmed and checked ${messageCount} message${messageCount === 1 ? "" : "s"} from ${imported.length} chat${imported.length === 1 ? "" : "s"}. File references were kept as metadata; file contents were not uploaded.`;
+    const sourceLimit = provider === "gemini"
+      ? "Gemini activity exports may omit AI replies."
+      : "Provider exports may omit non-text content.";
+    $("historyImportStatus").textContent = `Sherry confirmed ${messageCount} visible message${messageCount === 1 ? "" : "s"} from ${imported.length} chat${imported.length === 1 ? "" : "s"} in this file. This checks delivery from the file, not whether the provider export contains every original message. ${sourceLimit} Attachment files were not uploaded.`;
     $("historyImportFile").value = "";
     pendingClaudeImport = null;
-    button.textContent = "Preview Claude import";
+    button.textContent = provider === "claude" ? "Preview Claude import" : "Import chats";
   } catch (error) {
-    $("historyImportStatus").textContent = `Import failed: ${error.message}`;
+    $("historyImportStatus").textContent = uploadStarted
+      ? `Import stopped: ${error.message} Some messages may already be in Sherry. Retrying the same file checks duplicates before adding new messages.`
+      : `Import could not start: ${error.message}`;
   } finally {
     button.disabled = provider === "claude" && pendingClaudeImport?.counts.newMessages === 0;
   }
@@ -1434,13 +1447,23 @@ async function prepareExport() {
   exportPayload = null;
   try {
     if (isPreview) {
-      exportPayload = { exportedAt: new Date().toISOString(), workspace: workspace.name, conversations };
+      exportPayload = { exportedAt: new Date().toISOString(), workspace: workspace.name, conversations, summaries, personalMemory: { entries: personalMemoryEntries, categories: personalMemoryCustomCategories } };
       return;
     }
-    const full = await Promise.all(conversations.map(async (conversation) =>
-      (await api(`/v1/conversations/${conversation.id}?workspaceId=${workspace.id}`)).conversation
-    ));
-    exportPayload = { exportedAt: new Date().toISOString(), workspace: workspace.name, conversations: full };
+    const [full, summaryResponse, noteResponse] = await Promise.all([
+      Promise.all(conversations.map(async (conversation) =>
+        (await api(`/v1/conversations/${conversation.id}?workspaceId=${workspace.id}`)).conversation
+      )),
+      api(`/v1/summaries?workspaceId=${workspace.id}`),
+      api(`/v1/personal-memory?workspaceId=${workspace.id}`)
+    ]);
+    exportPayload = {
+      exportedAt: new Date().toISOString(),
+      workspace: workspace.name,
+      conversations: full,
+      summaries: summaryResponse.summaries || [],
+      personalMemory: { entries: noteResponse.entries || [], categories: noteResponse.categories || [] }
+    };
   } catch (error) {
     exportPayload = null;
     console.warn("Workspace export could not be prepared", error);
@@ -1693,11 +1716,12 @@ function renderSummaryDialog(summary) {
   $("summaryTitle").textContent = summary.conversation?.title || "Conversation summary";
   $("summaryMeta").textContent = `v${summary.version} · ${summary.status.replaceAll("_", " ")} · created ${formatDateTime(summary.created_at)}${summary.edited_at ? ` · edited ${formatDateTime(summary.edited_at)}` : ""}`;
   $("summaryText").value = summary.summary_text;
-  $("summarySourceLink").href = summary.conversation?.canonical_chat_url || "#";
+  setOriginalChatLink($("summarySourceLink"), summary.conversation?.canonical_chat_url);
   const detailValues = [
     summary.model ? `Model: ${summary.model}` : null,
     summary.total_tokens != null ? `${summary.total_tokens} tokens` : null,
     summary.exact_cost_usd != null ? `$${Number(summary.exact_cost_usd).toFixed(6)} exact cost` : null,
+    summary.exact_cost_usd == null && summary.estimated_cost_usd != null ? `~$${Number(summary.estimated_cost_usd).toFixed(4)} estimated cost` : null,
     `${summary.events.length} source messages`,
     ...(summary.topics || []).map((topic) => `Topic: ${topic}`)
   ].filter(Boolean);
@@ -2807,7 +2831,7 @@ async function openConversation(id, options = {}) {
   $("detailProvider").replaceChildren(providerIcon(selected.provider));
   $("detailTitle").textContent = selected.title;
   $("detailUpdatedAt").textContent = conversationActivityLabel(selected);
-  $("sourceLink").href = selected.canonical_chat_url || "#";
+  setOriginalChatLink($("sourceLink"), selected.canonical_chat_url);
   $("conversationSummaryStatus").textContent = "";
   if (!summaries) await loadSummaries();
   renderConversationSummary(selected);
@@ -2910,8 +2934,30 @@ $("closeSummary").onclick=()=>$("summaryDialog").close();
 $("saveSummary").onclick=saveSummaryEdit;
 $("deleteSummary").onclick=removeSummary;
 $("exportOne").onclick=()=>download(`${selected.title.replace(/[^a-z0-9]+/gi,"-").toLowerCase()}.json`,selected);
-$("deleteOne").onclick=()=>$("deleteDialog").showModal();$("cancelDelete").onclick=()=>$("deleteDialog").close();
-$("confirmDelete").onclick=async()=>{const id=selected.id;$("confirmDelete").disabled=true;try{if(!isPreview)await api(`/v1/conversations/${id}?workspaceId=${workspace.id}`,{method:"DELETE"});conversations=conversations.filter(c=>c.id!==id);dashboardData=isPreview?previewDashboardMetrics():await api(`/v1/dashboard?workspaceId=${workspace.id}`);$("deleteDialog").close();$("detailDialog").close();render();prepareExport();}finally{$("confirmDelete").disabled=false;}};
+$("deleteOne").onclick=()=>{$("deleteStatus").textContent="";$("deleteDialog").showModal();};$("cancelDelete").onclick=()=>$("deleteDialog").close();
+$("confirmDelete").onclick=async()=>{
+  const id=selected.id;
+  $("confirmDelete").disabled=true;
+  let result;
+  try {
+    result=isPreview?null:await api(`/v1/conversations/${id}?workspaceId=${workspace.id}`,{method:"DELETE"});
+  } catch(error) {
+    $("deleteStatus").textContent=error.message||"Deletion could not be completed. Please try again.";
+    $("confirmDelete").disabled=false;
+    return;
+  }
+  conversations=conversations.filter(c=>c.id!==id);
+  dashboardData=isPreview?previewDashboardMetrics():await api(`/v1/dashboard?workspaceId=${workspace.id}`).catch(()=>dashboardFallbackFromConversations(conversations));
+  $("deleteDialog").close();
+  $("detailDialog").close();
+  render();
+  prepareExport();
+  if(result?.deleted?.cleanupPending){
+    bootDataAlerts.push({severity:"warning",title:"Chat deleted; archive cleanup pending",message:"The chat is no longer available in Sherry. A background retry is finishing raw archive cleanup.",action:"Check Diagnostics again in a few minutes."});
+    renderSystemAlerts({alerts:[]});
+  }
+  $("confirmDelete").disabled=false;
+};
 $("settingsExport").onclick=(event)=>{event.preventDefault(); if(exportPayload) download("memory-export.json", exportPayload);};
 $("historyImportForm").onsubmit=importProviderHistory;
 $("historyImportProvider").onchange=updateHistoryImportProvider;
@@ -2922,7 +2968,6 @@ document.addEventListener("sherry-capture-ready", () => {
   void loadExtensionStatus();
   void connectExtensionWorkspace();
 });
-$("settingsDelete").onclick=()=>alert("Workspace deletion will be connected to the secure deletion flow before production release.");
 setSidebarCollapsed(localStorage.getItem("sherry_sidebar_collapsed") === "true");
 renderPersonalMemoryCategories();
 boot();

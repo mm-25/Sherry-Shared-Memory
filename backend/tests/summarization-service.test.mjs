@@ -111,6 +111,7 @@ test("manual cycle queues one eligible conversation, decrypts its key, and compl
   assert.deepEqual(complete.body.p_output, { ...gatewayOutput, claims: [] });
   assert.equal(harness.calls.some((call) => call.path.endsWith("/memory_claims")), false);
   assert.equal(complete.body.p_usage.totalTokens, 125);
+  assert.equal(complete.body.p_usage.estimatedCostUsd, null);
   assert.equal(JSON.stringify(harness.calls).includes("xai-test-secret"), false);
 });
 

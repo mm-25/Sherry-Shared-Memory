@@ -1,6 +1,7 @@
 import { selectCheckpointInput } from "./checkpoints.js";
 import { decryptSecret } from "./crypto.js";
 import { SummarizerGatewayError, summarizeCheckpoint } from "./summarizer-gateway.js";
+import { estimateSummarizationCostUsd } from "./summarization-cost.js";
 import { canonicalSummarizerModel } from "./settings.js";
 
 const MAX_SCHEDULED_JOBS_PER_CYCLE = 3;
@@ -189,7 +190,7 @@ export async function executeSummarizationJob(jobId, env, dependencies = {}) {
     const completion = await rpc("complete_summarization_job", {
       p_job_id: job.id,
       p_output: { ...result.output, claims: [] },
-      p_usage: { ...result.usage, estimatedCostUsd: null },
+      p_usage: { ...result.usage, estimatedCostUsd: estimateSummarizationCostUsd(config.provider, config.model, result.usage) },
       p_model_version: result.modelVersion,
       p_provider_request_id: result.providerRequestId,
       p_now: now.toISOString()

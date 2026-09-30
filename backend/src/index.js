@@ -495,9 +495,10 @@ async function rewriteArchiveWithoutConversation(objectKey, providerConversation
   const object = await env.RAW_MEMORY.get(objectKey);
   if (!object) return { deleted: false, missing: true, sha256: null, bytes: 0 };
   const archive = await object.json();
-  archive.events = Array.isArray(archive.events)
-    ? archive.events.filter((event) => event.conversationId !== providerConversationId)
-    : [];
+  if (!Array.isArray(archive.events)) throw new Error("Raw archive has no event list");
+  const remaining = archive.events.filter((event) => event.conversationId !== providerConversationId);
+  if (remaining.length === archive.events.length) return { unchanged: true };
+  archive.events = remaining;
   if (archive.events.length === 0) {
     await env.RAW_MEMORY.delete(objectKey);
     return { deleted: true, sha256: null, bytes: 0 };
@@ -508,38 +509,121 @@ async function rewriteArchiveWithoutConversation(objectKey, providerConversation
     httpMetadata: { contentType: "application/json" },
     customMetadata: { ...(object.customMetadata || {}), sha256 }
   });
-  return { deleted: false, sha256, bytes: new TextEncoder().encode(body).byteLength };
+  return {
+    deleted: false,
+    sha256,
+    bytes: new TextEncoder().encode(body).byteLength,
+    providerConversationIds: [...new Set(remaining.map((event) => event.conversationId))]
+  };
+}
+
+async function archiveKeysForConversation(workspaceId, provider, providerConversationId, env, fetchImpl) {
+  const keys = new Set();
+  const pageSize = 1000;
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await supabaseJson(
+      `ingestion_batches?workspace_id=eq.${encodeURIComponent(workspaceId)}&provider=eq.${encodeURIComponent(provider)}&select=raw_object_key,provider_conversation_ids&order=id.asc&limit=${pageSize}&offset=${offset}`,
+      env, fetchImpl
+    );
+    for (const batch of page) {
+      // Legacy duplicate-only batches have no event row to backfill this index.
+      // Inspect their archives so deleting a chat also removes those copies.
+      if (!Array.isArray(batch.provider_conversation_ids)
+        || batch.provider_conversation_ids.includes(providerConversationId)) keys.add(batch.raw_object_key);
+    }
+    if (page.length < pageSize) break;
+  }
+  return keys;
+}
+
+async function updateArchiveBatchMetadata(workspaceId, archiveResults, env, fetchImpl) {
+  for (const archive of archiveResults) {
+    const batchPath = `ingestion_batches?workspace_id=eq.${encodeURIComponent(workspaceId)}&raw_object_key=eq.${encodeURIComponent(archive.key)}`;
+    if (archive.unchanged) continue;
+    if (archive.missing) {
+      const references = await supabaseJson(
+        `conversation_events?workspace_id=eq.${encodeURIComponent(workspaceId)}&raw_object_key=eq.${encodeURIComponent(archive.key)}&select=id&limit=1`,
+        env, fetchImpl
+      );
+      if (references.length) continue;
+    }
+    if (archive.deleted || archive.missing) {
+      await supabaseJson(batchPath, env, fetchImpl, { method: "DELETE" });
+    } else {
+      await supabaseJson(batchPath, env, fetchImpl, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", prefer: "return=minimal" },
+        body: JSON.stringify({ payload_sha256: archive.sha256, payload_bytes: archive.bytes, provider_conversation_ids: archive.providerConversationIds })
+      });
+    }
+  }
+}
+
+async function markArchiveReconciled(workspaceId, provider, providerConversationId, env, fetchImpl) {
+  await supabaseJson(
+    `deleted_conversations?workspace_id=eq.${encodeURIComponent(workspaceId)}&provider=eq.${encodeURIComponent(provider)}&provider_conversation_id=eq.${encodeURIComponent(providerConversationId)}`,
+    env, fetchImpl,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json", prefer: "return=minimal" },
+      body: JSON.stringify({ archive_reconciled_at: new Date().toISOString() })
+    }
+  );
 }
 
 async function deleteConversation(workspaceId, conversationId, env, fetchImpl) {
   const detail = await conversationDetail(workspaceId, conversationId, env, fetchImpl);
   if (!detail) return null;
-  const keys = [...new Set(detail.events.map((event) => event.raw_object_key).filter(Boolean))];
-  const archiveResults = [];
-  for (const key of keys) {
-    const archive = await rewriteArchiveWithoutConversation(key, detail.provider_conversation_id, env);
-    archiveResults.push({ key, ...archive });
-  }
+  const keySet = await archiveKeysForConversation(workspaceId, detail.provider, detail.provider_conversation_id, env, fetchImpl);
+  for (const event of detail.events) if (event.raw_object_key) keySet.add(event.raw_object_key);
+  const keys = [...keySet];
+  // Record the deletion before touching external storage. If R2 fails, the
+  // scheduled reconciler can finish from this durable tombstone.
   await supabaseJson("deleted_conversations", env, fetchImpl, {
     method: "POST",
     headers: { "content-type": "application/json", prefer: "return=minimal,resolution=merge-duplicates" },
     body: JSON.stringify({ workspace_id: workspaceId, provider: detail.provider, provider_conversation_id: detail.provider_conversation_id })
   });
   await supabaseJson(`conversations?id=eq.${encodeURIComponent(conversationId)}&workspace_id=eq.${encodeURIComponent(workspaceId)}`, env, fetchImpl, { method: "DELETE" });
-  for (const archive of archiveResults) {
-    if (archive.missing) {
-      continue;
-    } else if (archive.deleted) {
-      await supabaseJson(`ingestion_batches?workspace_id=eq.${encodeURIComponent(workspaceId)}&raw_object_key=eq.${encodeURIComponent(archive.key)}`, env, fetchImpl, { method: "DELETE" });
-    } else {
-      await supabaseJson(`ingestion_batches?workspace_id=eq.${encodeURIComponent(workspaceId)}&raw_object_key=eq.${encodeURIComponent(archive.key)}`, env, fetchImpl, {
-        method: "PATCH",
-        headers: { "content-type": "application/json", prefer: "return=minimal" },
-        body: JSON.stringify({ payload_sha256: archive.sha256, payload_bytes: archive.bytes })
-      });
+  try {
+    const archiveResults = [];
+    for (const key of keys) {
+      const archive = await rewriteArchiveWithoutConversation(key, detail.provider_conversation_id, env);
+      archiveResults.push({ key, ...archive });
+    }
+    await updateArchiveBatchMetadata(workspaceId, archiveResults, env, fetchImpl);
+    await markArchiveReconciled(workspaceId, detail.provider, detail.provider_conversation_id, env, fetchImpl);
+    return { id: conversationId, rawArchivesUpdated: archiveResults.filter((archive) => archive.deleted || archive.sha256).length, cleanupPending: false };
+  } catch (error) {
+    console.error(JSON.stringify({ level: "error", event: "conversation_archive_cleanup_pending", conversationId, message: error?.message || "Unknown error" }));
+    return { id: conversationId, rawArchivesUpdated: 0, cleanupPending: true };
+  }
+}
+
+export async function reconcileDeletedArchives(env, fetchImpl = globalThis.fetch) {
+  const tombstones = await supabaseJson(
+    "deleted_conversations?archive_reconciled_at=is.null&select=id,workspace_id,provider,provider_conversation_id&order=deleted_at.asc,id.asc&limit=10",
+    env, fetchImpl
+  );
+  let reconciled = 0;
+  for (const tombstone of tombstones) {
+    try {
+      const active = await supabaseJson(
+        `conversations?workspace_id=eq.${encodeURIComponent(tombstone.workspace_id)}&provider=eq.${encodeURIComponent(tombstone.provider)}&provider_conversation_id=eq.${encodeURIComponent(tombstone.provider_conversation_id)}&select=id&limit=1`,
+        env, fetchImpl
+      );
+      if (active.length) continue;
+      const keys = await archiveKeysForConversation(tombstone.workspace_id, tombstone.provider, tombstone.provider_conversation_id, env, fetchImpl);
+      const results = [];
+      for (const key of keys) results.push({ key, ...await rewriteArchiveWithoutConversation(key, tombstone.provider_conversation_id, env) });
+      await updateArchiveBatchMetadata(tombstone.workspace_id, results, env, fetchImpl);
+      await markArchiveReconciled(tombstone.workspace_id, tombstone.provider, tombstone.provider_conversation_id, env, fetchImpl);
+      reconciled += 1;
+    } catch (error) {
+      console.error(JSON.stringify({ level: "error", event: "archive_reconciliation_failed", tombstoneId: tombstone.id, message: error?.message || "Unknown error" }));
     }
   }
-  return { id: conversationId, rawArchivesUpdated: keys.length };
+  return { checked: tombstones.length, reconciled };
 }
 
 async function omitDeletedConversations(batch, env, fetchImpl) {
@@ -810,7 +894,7 @@ export async function handleRequest(request, env, dependencies = {}) {
       }
       if (request.method === "DELETE" && conversationMatch) {
         const result = await deleteConversation(workspaceId, conversationMatch[1], env, fetchImpl);
-        return result ? jsonResponse({ ok: true, deleted: result }, 200, cors) : apiError("not_found", "Conversation not found.", 404, requestId, cors);
+        return result ? jsonResponse({ ok: true, deleted: result }, result.cleanupPending ? 202 : 200, cors) : apiError("not_found", "Conversation not found.", 404, requestId, cors);
       }
       if (request.method === "GET" && isSettingsRoute) {
         const settings = await getSummarizerSettings(workspaceId, env, (path, options) => supabaseJson(path, env, fetchImpl, options));
@@ -1028,6 +1112,20 @@ export async function handleRequest(request, env, dependencies = {}) {
   }
 
   const result = await metadataResponse.json();
+  try {
+    await supabaseJson(
+      `ingestion_batches?workspace_id=eq.${encodeURIComponent(redacted.batch.workspaceId)}&batch_id=eq.${encodeURIComponent(redacted.batch.batchId)}`,
+      env, fetchImpl,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", prefer: "return=minimal" },
+        body: JSON.stringify({ provider_conversation_ids: [...new Set(redacted.batch.events.map((event) => event.conversationId))] })
+      }
+    );
+  } catch {
+    // The committed archive remains discoverable through the null index on retry.
+    return apiError("archive_index_unavailable", "The archive index could not be saved. Retry this batch before advancing the cursor.", 503, requestId, cors);
+  }
   return jsonResponse({
     ok: true,
     requestId,
@@ -1048,6 +1146,16 @@ export const appHandler = {
         console.error(JSON.stringify({
           level: "error",
           event: "summarization_cycle_failed",
+          cron: controller.cron,
+          message: error?.message || "Unknown error"
+        }));
+      })
+    );
+    ctx.waitUntil(
+      reconcileDeletedArchives(env).catch((error) => {
+        console.error(JSON.stringify({
+          level: "error",
+          event: "archive_reconciliation_cycle_failed",
           cron: controller.cron,
           message: error?.message || "Unknown error"
         }));
