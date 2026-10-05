@@ -35,6 +35,10 @@ let reviewMode = "all";
 const deferredConflictIds = new Set();
 let memoryGraph = null;
 let mapMatchId = null;
+let selectingChats = false;
+let deletingChats = false;
+const selectedChatIds = new Set();
+let bulkDeleteTarget = null;
 let conversationFilters = { query: "", provider: "all", device: "all", date: "all", dateFrom: "", dateTo: "", artifacts: "all" };
 let conflictFilters = { query: "", sort: "newest", page: 1, pageSize: 10 };
 
@@ -1080,6 +1084,17 @@ function filteredConversations() {
 
 function render() {
   const visible = filteredConversations();
+  if (!conversations.length) selectingChats = false;
+  const availableIds = new Set(conversations.map((item) => item.id));
+  for (const id of selectedChatIds) if (!availableIds.has(id)) selectedChatIds.delete(id);
+  $("selectChats").textContent = selectingChats ? "Done selecting" : "Select chats";
+  $("selectChats").disabled = deletingChats || !conversations.length || isPreview;
+  $("chatSelectionActions").classList.toggle("hidden", !selectingChats);
+  $("chatSelectionCount").textContent = `${selectedChatIds.size} chat${selectedChatIds.size === 1 ? "" : "s"} selected`;
+  $("deleteSelectedChats").disabled = deletingChats || !selectedChatIds.size;
+  $("selectVisibleChats").disabled = deletingChats || !visible.length;
+  $("clearSelectedChats").disabled = deletingChats || !selectedChatIds.size;
+  $("settingsDeleteChats").disabled = deletingChats || !conversations.length || isPreview;
   const filtersActive = Boolean(conversationFilters.query) || conversationFilters.provider !== "all" || conversationFilters.device !== "all" || conversationFilters.date !== "all" || conversationFilters.artifacts !== "all";
   $("status").classList.toggle("hidden", conversations.length > 0 && !filtersActive);
   $("status").textContent = conversations.length
@@ -1088,6 +1103,13 @@ function render() {
   $("conversations").replaceChildren(...(visible.length ? visible.map((item) => {
     const button = document.createElement("button");
     button.className = "conversation";
+    button.dataset.conversationId = item.id;
+    button.classList.toggle("selection-mode", selectingChats);
+    button.classList.toggle("selected", selectedChatIds.has(item.id));
+    if (selectingChats) {
+      button.setAttribute("aria-pressed", String(selectedChatIds.has(item.id)));
+      button.setAttribute("aria-label", `${selectedChatIds.has(item.id) ? "Deselect" : "Select"} ${item.title || "Untitled conversation"}`);
+    }
     const count = item.conversation_events?.[0]?.count || item.message_count || 0;
     const summary = summaryForConversation(item);
     const description = truncateText(summary?.summary_text, 190) || "No conversation summary has been created yet.";
@@ -1098,7 +1120,14 @@ function render() {
     const activity = button.querySelector(".meta span:last-child");
     activity.textContent = formatDateTime(conversationActivityAt(item));
     activity.title = conversationActivityLabel(item);
-    button.onclick = () => openConversation(item.id);
+    button.onclick = () => {
+      if (selectingChats) {
+        if (selectedChatIds.has(item.id)) selectedChatIds.delete(item.id);
+        else selectedChatIds.add(item.id);
+        render();
+        [...document.querySelectorAll("#conversations .conversation")].find((card) => card.dataset.conversationId === item.id)?.focus();
+      } else openConversation(item.id);
+    };
     return button;
   }) : [emptyState(conversations.length ? "No conversations match these Chat Memory filters." : "Captured conversations will appear here after the extension sends them to Memory.")]));
   renderDashboard();
@@ -1117,6 +1146,89 @@ function updateConversationFilters() {
     artifacts: $("artifactFilter").value
   };
   render();
+}
+
+function openBulkDeleteDialog(ids, allChats) {
+  if (!ids.length || deletingChats) return;
+  bulkDeleteTarget = { ids: [...new Set(ids)], allChats };
+  const count = bulkDeleteTarget.ids.length;
+  $("bulkDeleteTitle").textContent = allChats ? "Delete all chats from Sherry?" : `Delete ${count} selected chat${count === 1 ? "" : "s"}?`;
+  $("bulkDeleteDescription").textContent = allChats
+    ? `This will delete all ${count} chats currently stored in this workspace.`
+    : `This will delete the ${count} chats you selected in Chat Memory.`;
+  $("bulkDeleteConfirmationLabel").classList.toggle("hidden", !allChats);
+  $("bulkDeleteConfirmation").value = "";
+  $("bulkDeleteStatus").textContent = "";
+  $("confirmBulkDelete").disabled = allChats;
+  $("bulkDeleteDialog").showModal();
+}
+
+async function deleteChatBatch() {
+  if (!bulkDeleteTarget || deletingChats || !workspace?.id || isPreview) return;
+  const { ids, allChats } = bulkDeleteTarget;
+  if (allChats && $("bulkDeleteConfirmation").value !== "DELETE ALL CHATS") return;
+  deletingChats = true;
+  $("cancelBulkDelete").disabled = true;
+  $("confirmBulkDelete").disabled = true;
+  $("bulkDeleteDialog").close();
+  render();
+  let deleted = 0;
+  let cleanupPending = 0;
+  const failed = [];
+  const progress = (message) => {
+    $("chatBulkStatus").textContent = message;
+    $("settingsDeleteChatsStatus").textContent = message;
+  };
+  for (const id of ids) {
+    progress(`Deleting chats… ${deleted + failed.length} of ${ids.length} processed.`);
+    try {
+      const result = await api(`/v1/conversations/${encodeURIComponent(id)}?workspaceId=${encodeURIComponent(workspace.id)}`, { method: "DELETE" });
+      if (result?.deleted?.cleanupPending) cleanupPending += 1;
+      deleted += 1;
+      conversations = conversations.filter((chat) => chat.id !== id);
+      summaries = (summaries || []).filter((summary) => summary.conversation_id !== id);
+      selectedChatIds.delete(id);
+    } catch (error) {
+      if (error.status === 404) {
+        deleted += 1;
+        conversations = conversations.filter((chat) => chat.id !== id);
+        summaries = (summaries || []).filter((summary) => summary.conversation_id !== id);
+        selectedChatIds.delete(id);
+      } else {
+        failed.push(id);
+        if (error.status === 401 || error.status === 403) break;
+      }
+    }
+  }
+  try {
+    const [chatResult, summaryResult, dashboardResult] = await Promise.allSettled([
+      api(`/v1/conversations?workspaceId=${workspace.id}`, { cache: "no-store" }),
+      api(`/v1/summaries?workspaceId=${workspace.id}`, { cache: "no-store" }),
+      api(`/v1/dashboard?workspaceId=${workspace.id}`, { cache: "no-store" })
+    ]);
+    const chatsVerified = chatResult.status === "fulfilled" && Array.isArray(chatResult.value?.conversations);
+    if (chatsVerified) conversations = chatResult.value.conversations;
+    if (summaryResult.status === "fulfilled" && Array.isArray(summaryResult.value?.summaries)) summaries = summaryResult.value.summaries;
+    dashboardData = dashboardResult.status === "fulfilled" ? dashboardResult.value : dashboardFallbackFromConversations(conversations);
+    const remaining = new Set(conversations.map((chat) => chat.id));
+    if (selected && !remaining.has(selected.id)) selected = null;
+    if (selectedSummary && !remaining.has(selectedSummary.conversation_id)) selectedSummary = null;
+    const stillPresent = ids.filter((id) => remaining.has(id));
+    const confirmedRemoved = ids.length - stillPresent.length;
+    const newChats = allChats ? conversations.filter((chat) => !ids.includes(chat.id)).length : 0;
+    const message = !chatsVerified
+      ? `${deleted} deletion requests succeeded, but Sherry could not verify the remaining chat list. Refresh Chat Memory before retrying.`
+      : stillPresent.length
+        ? `${confirmedRemoved} of ${ids.length} chats deleted. ${stillPresent.length} remain; you can select them and retry.`
+        : `${confirmedRemoved} chat${confirmedRemoved === 1 ? "" : "s"} deleted from Sherry.${newChats ? ` ${newChats} newer chat${newChats === 1 ? " remains" : "s remain"}.` : ""}${cleanupPending ? ` Raw backup cleanup is still running for ${cleanupPending}.` : ""}`;
+    progress(message);
+  } catch (error) {
+    progress(`${deleted} chats deleted. Could not refresh the remaining list: ${error.message}`);
+  } finally {
+    deletingChats = false;
+    bulkDeleteTarget = null;
+    render();
+  }
 }
 
 function closeProviderMenu() {
@@ -2894,6 +3006,28 @@ $("conflictSort").onchange=()=>{ conflictFilters.sort=$("conflictSort").value; c
 $("conflictPrevious").onclick=()=>{ conflictFilters.page=Math.max(1, conflictFilters.page-1); renderMemory(); $("conflictSection").scrollIntoView({ behavior:"smooth", block:"start" }); };
 $("conflictNext").onclick=()=>{ conflictFilters.page+=1; renderMemory(); $("conflictSection").scrollIntoView({ behavior:"smooth", block:"start" }); };
 $("conversationSearch").oninput=updateConversationFilters;
+$("selectChats").onclick=()=>{ selectingChats=!selectingChats; if(!selectingChats) selectedChatIds.clear(); $("chatBulkStatus").textContent=""; render(); };
+$("selectVisibleChats").onclick=()=>{ for(const chat of filteredConversations()) selectedChatIds.add(chat.id); render(); };
+$("clearSelectedChats").onclick=()=>{ selectedChatIds.clear(); render(); };
+$("deleteSelectedChats").onclick=()=>openBulkDeleteDialog([...selectedChatIds], false);
+$("settingsDeleteChats").onclick=async()=>{
+  if(isPreview || deletingChats || !workspace?.id) return;
+  $("settingsDeleteChats").disabled=true;
+  $("settingsDeleteChatsStatus").textContent="Checking stored chats…";
+  try {
+    const result=await api(`/v1/conversations?workspaceId=${workspace.id}`, {cache:"no-store"});
+    if(!Array.isArray(result.conversations)) throw new Error("The chat list was not returned.");
+    conversations=result.conversations;
+    render();
+    if(!conversations.length){ $("settingsDeleteChatsStatus").textContent="There are no chats to delete."; return; }
+    $("settingsDeleteChatsStatus").textContent="";
+    openBulkDeleteDialog(conversations.map((chat)=>chat.id), true);
+  }catch(error){ $("settingsDeleteChatsStatus").textContent=`Could not check chats: ${error.message}`; }
+  finally{ render(); }
+};
+$("cancelBulkDelete").onclick=()=>{ bulkDeleteTarget=null; $("bulkDeleteDialog").close(); };
+$("bulkDeleteConfirmation").oninput=()=>{ $("confirmBulkDelete").disabled=$("bulkDeleteConfirmation").value!=="DELETE ALL CHATS"; };
+$("confirmBulkDelete").onclick=deleteChatBatch;
 ["providerFilter","deviceFilter","dateFilter","artifactFilter"].forEach((id)=>$(id).onchange=updateConversationFilters);
 $("dateFrom").onchange=updateConversationFilters;
 $("dateTo").onchange=updateConversationFilters;
