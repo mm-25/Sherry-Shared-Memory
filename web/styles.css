@@ -98,6 +98,11 @@ h1, h2, h3, h4, p { overflow-wrap: anywhere; }
 .dashboard-heading { align-items: flex-start; margin-bottom: 24px; }
 .dashboard-heading h2 { margin: 0 0 4px; font-size: 28px; letter-spacing: -.03em; }
 .dashboard-heading p { font-size: 13px; }
+.chat-refresh-actions { display: grid; justify-items: end; gap: 5px; }
+.chat-refresh-actions button { gap: 8px; white-space: nowrap; }
+.chat-refresh-actions svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.chat-refresh-status { max-width: 240px; color: var(--text-muted); font-size: 11px; line-height: 1.35; text-align: right; }
+.chat-refresh-status.error { color: var(--danger); }
 .muted { color: var(--text-muted); }
 .status { min-height: 40px; padding: 16px 0; color: var(--text-muted); font-size: 13px; }
 .error { min-height: 20px; margin: 0; color: var(--danger); font-size: 13px; }
@@ -551,6 +556,8 @@ button.metric-detail-row:hover { border-color: #9c9da1; background: var(--surfac
   .page-heading h2 { font-size: 32px; }
   .dashboard-heading h2 { font-size: 28px; }
   .header-actions { justify-content: flex-start; }
+  .chat-refresh-actions { justify-items: start; }
+  .chat-refresh-status { text-align: left; }
   .dashboard-card, .dashboard-card-wide, .dashboard-card-review, .dashboard-card-half { grid-column: 1 / -1; min-height: 248px; }
   .review-visual { grid-template-columns: 112px minmax(0, 1fr); }
   .review-visual svg { width: 112px; height: 112px; }

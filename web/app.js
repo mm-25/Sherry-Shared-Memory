@@ -35,6 +35,7 @@ let reviewMode = "all";
 const deferredConflictIds = new Set();
 let memoryGraph = null;
 let mapMatchId = null;
+let refreshingChatMemory = false;
 let selectingChats = false;
 let deletingChats = false;
 const selectedChatIds = new Set();
@@ -1146,6 +1147,44 @@ function updateConversationFilters() {
     artifacts: $("artifactFilter").value
   };
   render();
+}
+
+async function refreshChatMemory() {
+  if (refreshingChatMemory) return;
+  const button = $("refreshChatMemory");
+  const label = button.querySelector("span");
+  const status = $("chatMemoryRefreshStatus");
+  refreshingChatMemory = true;
+  button.disabled = true;
+  label.textContent = "Refreshing…";
+  status.classList.remove("error");
+  status.textContent = "Checking for updated chats…";
+  try {
+    if (isPreview) {
+      status.textContent = "Sample data cannot refresh.";
+      return;
+    }
+    if (!workspace?.id) throw new Error("No active workspace is available.");
+    const [chatResult, summaryResult] = await Promise.allSettled([
+      api(`/v1/conversations?workspaceId=${workspace.id}`, { cache: "no-store" }),
+      api(`/v1/summaries?workspaceId=${workspace.id}`, { cache: "no-store" })
+    ]);
+    if (chatResult.status === "rejected") throw chatResult.reason;
+    if (!Array.isArray(chatResult.value?.conversations)) throw new Error("The chat list was not returned.");
+    conversations = chatResult.value.conversations;
+    const summariesUpdated = summaryResult.status === "fulfilled" && Array.isArray(summaryResult.value?.summaries);
+    if (summariesUpdated) summaries = summaryResult.value.summaries;
+    render();
+    status.textContent = summariesUpdated ? "Checked just now." : "Chats updated; summaries could not refresh.";
+    status.classList.toggle("error", !summariesUpdated);
+  } catch (error) {
+    status.classList.add("error");
+    status.textContent = `Could not refresh chats: ${error.message}`;
+  } finally {
+    refreshingChatMemory = false;
+    button.disabled = false;
+    label.textContent = "Refresh";
+  }
 }
 
 function openBulkDeleteDialog(ids, allChats) {
@@ -3006,6 +3045,7 @@ $("conflictSort").onchange=()=>{ conflictFilters.sort=$("conflictSort").value; c
 $("conflictPrevious").onclick=()=>{ conflictFilters.page=Math.max(1, conflictFilters.page-1); renderMemory(); $("conflictSection").scrollIntoView({ behavior:"smooth", block:"start" }); };
 $("conflictNext").onclick=()=>{ conflictFilters.page+=1; renderMemory(); $("conflictSection").scrollIntoView({ behavior:"smooth", block:"start" }); };
 $("conversationSearch").oninput=updateConversationFilters;
+$("refreshChatMemory").onclick=refreshChatMemory;
 $("selectChats").onclick=()=>{ selectingChats=!selectingChats; if(!selectingChats) selectedChatIds.clear(); $("chatBulkStatus").textContent=""; render(); };
 $("selectVisibleChats").onclick=()=>{ for(const chat of filteredConversations()) selectedChatIds.add(chat.id); render(); };
 $("clearSelectedChats").onclick=()=>{ selectedChatIds.clear(); render(); };
