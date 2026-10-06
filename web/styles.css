@@ -227,7 +227,7 @@ button:active, .primary:active, .secondary:active, .quiet:active { transform: sc
 .conversation-table tbody tr:hover { background: var(--surface); }
 .conversation-table tbody tr.selected { background: var(--accent-soft); }
 .conversation-table td:first-child { padding: 4px 8px; }
-.conversation-row-button { display: grid; justify-items: start; width: 100%; min-height: 52px; padding: 7px 8px; border: 0; background: transparent; text-align: left; }
+.conversation-row-button { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: start; width: 100%; min-height: 52px; padding: 7px 8px; border: 0; background: transparent; text-align: left; }
 .conversation-row-button:hover { border: 0; background: transparent; }
 .conversation-row-button strong { color: var(--text-primary); font-size: 13px; font-weight: 600; }
 .conversation-row-button small { max-width: 45ch; overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
