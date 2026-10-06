@@ -36,3 +36,49 @@ test("missing activity and repeated titles sort predictably", () => {
   assert.deepEqual(ids(context.sortConversations(items, "recent")), ["new", "a", "b"]);
   assert.deepEqual(ids(context.sortConversations(items, "oldest")), ["a", "b", "new"]);
 });
+
+class FakeElement {
+  constructor(tagName) {
+    this.tagName = tagName;
+    this.children = [];
+    this.dataset = {};
+    this.attributes = {};
+    this.classes = new Set();
+    this.classList = { toggle: (name, on) => on ? this.classes.add(name) : this.classes.delete(name) };
+  }
+  append(...children) { this.children.push(...children); }
+  setAttribute(name, value) { this.attributes[name] = value; }
+  querySelector(selector) {
+    if (selector !== "tbody") throw new Error(`Unexpected selector ${selector}`);
+    return this.body ||= new FakeElement("tbody");
+  }
+}
+
+test("table view gives each chat an accessible open or select button", () => {
+  const selectedChatIds = new Set(["late"]);
+  const opened = [];
+  const tableContext = {
+    document: { createElement: (tag) => new FakeElement(tag) },
+    selectedChatIds,
+    selectingChats: true,
+    activateChat: (chat) => opened.push(chat.id),
+    summaryForConversation: () => ({ summary_text: "A saved chat summary" }),
+    truncateText: (value) => value,
+    providerLabel: (provider) => provider.toUpperCase(),
+    formatDateTime: (value) => value,
+    conversationActivityAt: (item) => item.last_activity_at,
+    conversationActivityLabel: () => "Last message"
+  };
+  vm.runInNewContext(`${source}\n${app.slice(app.indexOf("function renderChatTable("), app.indexOf("function render()"))}\nthis.renderChatTable = renderChatTable;`, tableContext);
+  const table = tableContext.renderChatTable([{ ...chats[0], provider: "chatgpt" }]);
+  assert.equal(table.tagName, "table");
+  assert.match(table.innerHTML, /<th scope="col">Last activity<\/th>/);
+  const row = table.body.children[0];
+  assert.equal(row.children.length, 4);
+  const button = row.children[0].children[0];
+  assert.equal(button.attributes["aria-pressed"], "true");
+  assert.equal(button.attributes["aria-label"], "Deselect zeta");
+  assert.equal(button.children[0].textContent, "zeta");
+  button.onclick();
+  assert.deepEqual(opened, ["late"]);
+});
