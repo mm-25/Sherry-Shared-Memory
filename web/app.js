@@ -40,6 +40,9 @@ let selectingChats = false;
 let deletingChats = false;
 const selectedChatIds = new Set();
 let bulkDeleteTarget = null;
+const CHAT_SORT_OPTIONS = new Set(["recent", "oldest", "title-asc", "title-desc", "most-messages"]);
+let chatSort = CHAT_SORT_OPTIONS.has(localStorage.getItem("sherry_chat_sort")) ? localStorage.getItem("sherry_chat_sort") : "recent";
+let chatView = localStorage.getItem("sherry_chat_view") === "table" ? "table" : "grid";
 let conversationFilters = { query: "", provider: "all", device: "all", date: "all", dateFrom: "", dateTo: "", artifacts: "all" };
 let conflictFilters = { query: "", sort: "newest", page: 1, pageSize: 10 };
 
@@ -1083,25 +1086,99 @@ function filteredConversations() {
   });
 }
 
+function chatMessageCount(item) {
+  return Number(item.conversation_events?.[0]?.count ?? item.message_count ?? 0) || 0;
+}
+
+function sortConversations(items, sort = chatSort) {
+  const title = (item) => String(item.title || "Untitled conversation");
+  const activity = (item) => new Date(conversationActivityAt(item) || 0).getTime() || 0;
+  return [...items].sort((left, right) => {
+    let difference = 0;
+    if (sort === "oldest") difference = activity(left) - activity(right);
+    else if (sort === "title-asc") difference = title(left).localeCompare(title(right), undefined, { sensitivity: "base" });
+    else if (sort === "title-desc") difference = title(right).localeCompare(title(left), undefined, { sensitivity: "base" });
+    else if (sort === "most-messages") difference = chatMessageCount(right) - chatMessageCount(left);
+    else difference = activity(right) - activity(left);
+    return difference || title(left).localeCompare(title(right), undefined, { sensitivity: "base" }) || String(left.id).localeCompare(String(right.id));
+  });
+}
+
+function activateChat(item) {
+  if (!selectingChats) return openConversation(item.id);
+  if (selectedChatIds.has(item.id)) selectedChatIds.delete(item.id);
+  else selectedChatIds.add(item.id);
+  render();
+  [...document.querySelectorAll("#conversations [data-conversation-id]")].find((target) => target.dataset.conversationId === item.id)?.focus();
+}
+
+function renderChatTable(items) {
+  const table = document.createElement("table");
+  table.className = "conversation-table";
+  table.innerHTML = '<thead><tr><th scope="col">Chat</th><th scope="col">Platform</th><th scope="col">Messages</th><th scope="col">Last activity</th></tr></thead><tbody></tbody>';
+  const body = table.querySelector("tbody");
+  for (const item of items) {
+    const row = document.createElement("tr");
+    row.classList.toggle("selected", selectedChatIds.has(item.id));
+    const titleCell = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "conversation-row-button";
+    button.dataset.conversationId = item.id;
+    button.classList.toggle("selection-mode", selectingChats);
+    button.classList.toggle("selected", selectedChatIds.has(item.id));
+    if (selectingChats) {
+      button.setAttribute("aria-pressed", String(selectedChatIds.has(item.id)));
+      button.setAttribute("aria-label", `${selectedChatIds.has(item.id) ? "Deselect" : "Select"} ${item.title || "Untitled conversation"}`);
+    }
+    const title = document.createElement("strong");
+    title.textContent = item.title || "Untitled conversation";
+    const summary = document.createElement("small");
+    summary.textContent = truncateText(summaryForConversation(item)?.summary_text, 110) || "No summary yet";
+    button.append(title, summary);
+    button.onclick = () => activateChat(item);
+    titleCell.append(button);
+    const provider = document.createElement("td");
+    provider.textContent = providerLabel(item.provider);
+    const messages = document.createElement("td");
+    messages.textContent = String(chatMessageCount(item));
+    const activity = document.createElement("td");
+    activity.textContent = formatDateTime(conversationActivityAt(item));
+    activity.title = conversationActivityLabel(item);
+    row.append(titleCell, provider, messages, activity);
+    body.append(row);
+  }
+  return table;
+}
+
 function render() {
-  const visible = filteredConversations();
+  const visible = sortConversations(filteredConversations());
   if (!conversations.length) selectingChats = false;
   const availableIds = new Set(conversations.map((item) => item.id));
   for (const id of selectedChatIds) if (!availableIds.has(id)) selectedChatIds.delete(id);
   $("selectChats").textContent = selectingChats ? "Done selecting" : "Select chats";
+  $("selectChats").setAttribute("aria-pressed", String(selectingChats));
   $("selectChats").disabled = deletingChats || !conversations.length || isPreview;
+  $("chatSort").value = chatSort;
+  $("chatGridView").setAttribute("aria-pressed", String(chatView === "grid"));
+  $("chatTableView").setAttribute("aria-pressed", String(chatView === "table"));
+  $("chatGridView").classList.toggle("active-segment", chatView === "grid");
+  $("chatTableView").classList.toggle("active-segment", chatView === "table");
+  $("conversations").classList.toggle("conversation-grid", chatView === "grid");
+  $("conversations").classList.toggle("conversation-table-wrap", chatView === "table");
   $("chatSelectionActions").classList.toggle("hidden", !selectingChats);
   $("chatSelectionCount").textContent = `${selectedChatIds.size} chat${selectedChatIds.size === 1 ? "" : "s"} selected`;
   $("deleteSelectedChats").disabled = deletingChats || !selectedChatIds.size;
   $("selectVisibleChats").disabled = deletingChats || !visible.length;
   $("clearSelectedChats").disabled = deletingChats || !selectedChatIds.size;
   $("settingsDeleteChats").disabled = deletingChats || !conversations.length || isPreview;
-  const filtersActive = Boolean(conversationFilters.query) || conversationFilters.provider !== "all" || conversationFilters.device !== "all" || conversationFilters.date !== "all" || conversationFilters.artifacts !== "all";
-  $("status").classList.toggle("hidden", conversations.length > 0 && !filtersActive);
+  $("status").classList.remove("hidden");
   $("status").textContent = conversations.length
-    ? `${visible.length} of ${conversations.length} conversation${conversations.length === 1 ? "" : "s"}`
+    ? visible.length === conversations.length
+      ? `${visible.length} chat${visible.length === 1 ? "" : "s"}`
+      : `${visible.length} of ${conversations.length} chats`
     : "No captured conversations yet.";
-  $("conversations").replaceChildren(...(visible.length ? visible.map((item) => {
+  const cards = chatView === "grid" ? visible.map((item) => {
     const button = document.createElement("button");
     button.className = "conversation";
     button.dataset.conversationId = item.id;
@@ -1111,7 +1188,7 @@ function render() {
       button.setAttribute("aria-pressed", String(selectedChatIds.has(item.id)));
       button.setAttribute("aria-label", `${selectedChatIds.has(item.id) ? "Deselect" : "Select"} ${item.title || "Untitled conversation"}`);
     }
-    const count = item.conversation_events?.[0]?.count || item.message_count || 0;
+    const count = chatMessageCount(item);
     const summary = summaryForConversation(item);
     const description = truncateText(summary?.summary_text, 190) || "No conversation summary has been created yet.";
     button.innerHTML = `<div class="conversation-head"><span class="provider-slot"></span><span class="conversation-arrow" aria-hidden="true">→</span></div><h3></h3><p class="conversation-summary"></p><div class="meta"><span>${count} ${count === 1 ? "msg" : "msgs"}</span><span></span></div>`;
@@ -1121,16 +1198,12 @@ function render() {
     const activity = button.querySelector(".meta span:last-child");
     activity.textContent = formatDateTime(conversationActivityAt(item));
     activity.title = conversationActivityLabel(item);
-    button.onclick = () => {
-      if (selectingChats) {
-        if (selectedChatIds.has(item.id)) selectedChatIds.delete(item.id);
-        else selectedChatIds.add(item.id);
-        render();
-        [...document.querySelectorAll("#conversations .conversation")].find((card) => card.dataset.conversationId === item.id)?.focus();
-      } else openConversation(item.id);
-    };
+    button.onclick = () => activateChat(item);
     return button;
-  }) : [emptyState(conversations.length ? "No conversations match these Chat Memory filters." : "Captured conversations will appear here after the extension sends them to Memory.")]));
+  }) : [];
+  $("conversations").replaceChildren(...(visible.length
+    ? chatView === "table" ? [renderChatTable(visible)] : cards
+    : [emptyState(conversations.length ? "No conversations match these Chat Memory filters." : "Captured conversations will appear here after the extension sends them to Memory.")]));
   renderDashboard();
 }
 
@@ -3045,6 +3118,9 @@ $("conflictSort").onchange=()=>{ conflictFilters.sort=$("conflictSort").value; c
 $("conflictPrevious").onclick=()=>{ conflictFilters.page=Math.max(1, conflictFilters.page-1); renderMemory(); $("conflictSection").scrollIntoView({ behavior:"smooth", block:"start" }); };
 $("conflictNext").onclick=()=>{ conflictFilters.page+=1; renderMemory(); $("conflictSection").scrollIntoView({ behavior:"smooth", block:"start" }); };
 $("conversationSearch").oninput=updateConversationFilters;
+$("chatSort").onchange=()=>{ chatSort=$("chatSort").value; localStorage.setItem("sherry_chat_sort", chatSort); render(); };
+$("chatGridView").onclick=()=>{ chatView="grid"; localStorage.setItem("sherry_chat_view", chatView); render(); };
+$("chatTableView").onclick=()=>{ chatView="table"; localStorage.setItem("sherry_chat_view", chatView); render(); };
 $("refreshChatMemory").onclick=refreshChatMemory;
 $("selectChats").onclick=()=>{ selectingChats=!selectingChats; if(!selectingChats) selectedChatIds.clear(); $("chatBulkStatus").textContent=""; render(); };
 $("selectVisibleChats").onclick=()=>{ for(const chat of filteredConversations()) selectedChatIds.add(chat.id); render(); };
