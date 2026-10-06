@@ -36,10 +36,13 @@ const deferredConflictIds = new Set();
 let memoryGraph = null;
 let mapMatchId = null;
 let refreshingChatMemory = false;
-let selectingChats = false;
 let deletingChats = false;
 const selectedChatIds = new Set();
 let bulkDeleteTarget = null;
+const NEW_CHAT_WINDOW_MS = 5 * 60 * 1000;
+let newChatExpiryTimer = null;
+let seenNewChatStorageKey = null;
+let seenNewChatExpiries = {};
 const CHAT_SORT_OPTIONS = new Set(["recent", "oldest", "title-asc", "title-desc", "most-messages"]);
 let chatSort = CHAT_SORT_OPTIONS.has(localStorage.getItem("sherry_chat_sort")) ? localStorage.getItem("sherry_chat_sort") : "recent";
 let chatView = localStorage.getItem("sherry_chat_view") === "table" ? "table" : "grid";
@@ -47,7 +50,7 @@ let conversationFilters = { query: "", provider: "all", device: "all", date: "al
 let conflictFilters = { query: "", sort: "newest", page: 1, pageSize: 10 };
 
 const previewConversations = [
-  { id: "preview-1", provider: "chatgpt", title: "Memory platform — product direction", last_captured_at: new Date(Date.now() - 36e5).toISOString(), conversation_events: [{ count: 28 }], events: [{ role: "user", text_content: "I want one memory layer that works across the AI tools I already use." }, { role: "assistant", text_content: "The product can separate capture, durable memory, retrieval, and provider permissions." }] },
+  { id: "preview-1", provider: "chatgpt", title: "Memory platform — product direction", created_at: new Date(Date.now() - 2 * 60e3).toISOString(), last_captured_at: new Date(Date.now() - 60e3).toISOString(), conversation_events: [{ count: 28 }], events: [{ role: "user", text_content: "I want one memory layer that works across the AI tools I already use." }, { role: "assistant", text_content: "The product can separate capture, durable memory, retrieval, and provider permissions." }] },
   { id: "preview-2", provider: "claude", title: "Detailed design feedback preferences", last_captured_at: new Date(Date.now() - 864e5).toISOString(), conversation_events: [{ count: 14 }], events: [{ role: "user", text_content: "I prefer detailed design feedback with the reasoning explained clearly." }, { role: "assistant", text_content: "I will retain that as a reusable communication preference." }] },
   { id: "preview-3", provider: "gemini", title: "Research synthesis for shared memory", last_captured_at: new Date(Date.now() - 2 * 864e5).toISOString(), conversation_events: [{ count: 19 }], events: [{ role: "user", text_content: "Compare approaches to user-owned cloud memory." }, { role: "assistant", text_content: "A fast indexed layer can sync with user-controlled export storage." }] },
   { id: "preview-4", provider: "chatgpt", title: "Memory Test 4", last_captured_at: new Date(Date.now() - 3 * 864e5).toISOString(), conversation_events: [{ count: 11 }], events: [{ role: "user", text_content: "Project updates should be short bullet points." }, { role: "assistant", text_content: "Understood." }] },
@@ -1104,39 +1107,112 @@ function sortConversations(items, sort = chatSort) {
   });
 }
 
-function activateChat(item) {
-  if (!selectingChats) return openConversation(item.id);
-  if (selectedChatIds.has(item.id)) selectedChatIds.delete(item.id);
-  else selectedChatIds.add(item.id);
-  render();
-  [...document.querySelectorAll("#conversations [data-conversation-id]")].find((target) => target.dataset.conversationId === item.id)?.focus();
+function newChatExpiryAt(item) {
+  const created = Date.parse(item?.created_at || "");
+  return Number.isFinite(created) ? created + NEW_CHAT_WINDOW_MS : 0;
+}
+
+function seenNewChats() {
+  const key = `sherry_seen_new_chats:${workspace?.id || "preview"}`;
+  if (seenNewChatStorageKey !== key) {
+    seenNewChatStorageKey = key;
+    try {
+      const stored = JSON.parse(localStorage.getItem(key) || "{}");
+      seenNewChatExpiries = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+    } catch {
+      seenNewChatExpiries = {};
+    }
+  }
+  return seenNewChatExpiries;
+}
+
+function isNewChat(item, now = Date.now()) {
+  const expires = newChatExpiryAt(item);
+  return expires > now && expires - NEW_CHAT_WINDOW_MS <= now && !seenNewChats()[item.id];
+}
+
+function markChatSeen(id) {
+  const item = conversations.find((chat) => chat.id === id);
+  if (!item || !isNewChat(item)) return false;
+  const seen = seenNewChats();
+  seen[id] = newChatExpiryAt(item);
+  localStorage.setItem(seenNewChatStorageKey, JSON.stringify(seen));
+  return true;
+}
+
+function scheduleNewChatExpiry(now = Date.now()) {
+  if (newChatExpiryTimer) clearTimeout(newChatExpiryTimer);
+  const expiries = conversations.filter((item) => isNewChat(item, now)).map(newChatExpiryAt);
+  if (!expiries.length) { newChatExpiryTimer = null; return; }
+  newChatExpiryTimer = setTimeout(() => { newChatExpiryTimer = null; render(); }, Math.max(0, Math.min(...expiries) - now + 20));
+}
+
+function newChatBadge() {
+  const badge = document.createElement("span");
+  badge.className = "new-chat-badge";
+  badge.textContent = "New";
+  return badge;
+}
+
+function chatCheckbox(item) {
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "chat-row-checkbox";
+  checkbox.dataset.conversationId = item.id;
+  checkbox.setAttribute("aria-label", `Select ${item.title || "Untitled conversation"}`);
+  checkbox.checked = selectedChatIds.has(item.id);
+  checkbox.disabled = deletingChats;
+  checkbox.onchange = () => {
+    if (checkbox.checked) selectedChatIds.add(item.id);
+    else selectedChatIds.delete(item.id);
+    render();
+    [...document.querySelectorAll("#conversations input[data-conversation-id]")].find((target) => target.dataset.conversationId === item.id)?.focus();
+  };
+  return checkbox;
 }
 
 function renderChatTable(items) {
   const table = document.createElement("table");
   table.className = "conversation-table";
-  table.innerHTML = '<thead><tr><th scope="col">Chat</th><th scope="col">Platform</th><th scope="col">Messages</th><th scope="col">Last activity</th></tr></thead><tbody></tbody>';
+  table.innerHTML = '<thead><tr><th scope="col" class="select-column"></th><th scope="col">Chat</th><th scope="col">Platform</th><th scope="col">Messages</th><th scope="col">Last activity</th></tr></thead><tbody></tbody>';
+  const headerSelect = document.createElement("input");
+  headerSelect.type = "checkbox";
+  headerSelect.className = "chat-row-checkbox";
+  headerSelect.setAttribute("aria-label", "Select all visible chats");
+  headerSelect.checked = items.every((item) => selectedChatIds.has(item.id));
+  headerSelect.indeterminate = !headerSelect.checked && items.some((item) => selectedChatIds.has(item.id));
+  headerSelect.disabled = deletingChats;
+  headerSelect.onchange = () => {
+    for (const item of items) {
+      if (headerSelect.checked) selectedChatIds.add(item.id);
+      else selectedChatIds.delete(item.id);
+    }
+    render();
+    $("conversations").querySelector(".conversation-table thead input")?.focus();
+  };
+  table.querySelector("thead th").append(headerSelect);
   const body = table.querySelector("tbody");
   for (const item of items) {
     const row = document.createElement("tr");
     row.classList.toggle("selected", selectedChatIds.has(item.id));
+    const selectCell = document.createElement("td");
+    selectCell.className = "select-column";
+    selectCell.append(chatCheckbox(item));
     const titleCell = document.createElement("td");
     const button = document.createElement("button");
     button.type = "button";
     button.className = "conversation-row-button";
     button.dataset.conversationId = item.id;
-    button.classList.toggle("selection-mode", selectingChats);
-    button.classList.toggle("selected", selectedChatIds.has(item.id));
-    if (selectingChats) {
-      button.setAttribute("aria-pressed", String(selectedChatIds.has(item.id)));
-      button.setAttribute("aria-label", `${selectedChatIds.has(item.id) ? "Deselect" : "Select"} ${item.title || "Untitled conversation"}`);
-    }
+    const titleLine = document.createElement("span");
+    titleLine.className = "chat-title-line";
     const title = document.createElement("strong");
     title.textContent = item.title || "Untitled conversation";
+    titleLine.append(title);
+    if (isNewChat(item)) titleLine.append(newChatBadge());
     const summary = document.createElement("small");
     summary.textContent = truncateText(summaryForConversation(item)?.summary_text, 110) || "No summary yet";
-    button.append(title, summary);
-    button.onclick = () => activateChat(item);
+    button.append(titleLine, summary);
+    button.onclick = () => openConversation(item.id);
     titleCell.append(button);
     const provider = document.createElement("td");
     provider.textContent = providerLabel(item.provider);
@@ -1145,7 +1221,7 @@ function renderChatTable(items) {
     const activity = document.createElement("td");
     activity.textContent = formatDateTime(conversationActivityAt(item));
     activity.title = conversationActivityLabel(item);
-    row.append(titleCell, provider, messages, activity);
+    row.append(selectCell, titleCell, provider, messages, activity);
     body.append(row);
   }
   return table;
@@ -1153,12 +1229,8 @@ function renderChatTable(items) {
 
 function render() {
   const visible = sortConversations(filteredConversations());
-  if (!conversations.length) selectingChats = false;
   const availableIds = new Set(conversations.map((item) => item.id));
   for (const id of selectedChatIds) if (!availableIds.has(id)) selectedChatIds.delete(id);
-  $("selectChats").textContent = selectingChats ? "Done selecting" : "Select chats";
-  $("selectChats").setAttribute("aria-pressed", String(selectingChats));
-  $("selectChats").disabled = deletingChats || !conversations.length || isPreview;
   $("chatSort").value = chatSort;
   $("chatGridView").setAttribute("aria-pressed", String(chatView === "grid"));
   $("chatTableView").setAttribute("aria-pressed", String(chatView === "table"));
@@ -1166,9 +1238,9 @@ function render() {
   $("chatTableView").classList.toggle("active-segment", chatView === "table");
   $("conversations").classList.toggle("conversation-grid", chatView === "grid");
   $("conversations").classList.toggle("conversation-table-wrap", chatView === "table");
-  $("chatSelectionActions").classList.toggle("hidden", !selectingChats);
+  $("chatSelectionActions").classList.toggle("hidden", !selectedChatIds.size);
   $("chatSelectionCount").textContent = `${selectedChatIds.size} chat${selectedChatIds.size === 1 ? "" : "s"} selected`;
-  $("deleteSelectedChats").disabled = deletingChats || !selectedChatIds.size;
+  $("deleteSelectedChats").disabled = deletingChats || !selectedChatIds.size || isPreview;
   $("selectVisibleChats").disabled = deletingChats || !visible.length;
   $("clearSelectedChats").disabled = deletingChats || !selectedChatIds.size;
   $("settingsDeleteChats").disabled = deletingChats || !conversations.length || isPreview;
@@ -1179,31 +1251,33 @@ function render() {
       : `${visible.length} of ${conversations.length} chats`
     : "No captured conversations yet.";
   const cards = chatView === "grid" ? visible.map((item) => {
+    const card = document.createElement("article");
+    card.className = "conversation-card";
+    card.classList.toggle("selected", selectedChatIds.has(item.id));
     const button = document.createElement("button");
+    button.type = "button";
     button.className = "conversation";
     button.dataset.conversationId = item.id;
-    button.classList.toggle("selection-mode", selectingChats);
-    button.classList.toggle("selected", selectedChatIds.has(item.id));
-    if (selectingChats) {
-      button.setAttribute("aria-pressed", String(selectedChatIds.has(item.id)));
-      button.setAttribute("aria-label", `${selectedChatIds.has(item.id) ? "Deselect" : "Select"} ${item.title || "Untitled conversation"}`);
-    }
     const count = chatMessageCount(item);
     const summary = summaryForConversation(item);
     const description = truncateText(summary?.summary_text, 190) || "No conversation summary has been created yet.";
     button.innerHTML = `<div class="conversation-head"><span class="provider-slot"></span><span class="conversation-arrow" aria-hidden="true">→</span></div><h3></h3><p class="conversation-summary"></p><div class="meta"><span>${count} ${count === 1 ? "msg" : "msgs"}</span><span></span></div>`;
     button.querySelector(".provider-slot").replaceWith(providerIcon(item.provider));
-    button.querySelector("h3").textContent = item.title || "Untitled conversation";
+    const heading = button.querySelector("h3");
+    heading.textContent = item.title || "Untitled conversation";
+    if (isNewChat(item)) heading.append(newChatBadge());
     button.querySelector(".conversation-summary").textContent = description;
     const activity = button.querySelector(".meta span:last-child");
     activity.textContent = formatDateTime(conversationActivityAt(item));
     activity.title = conversationActivityLabel(item);
-    button.onclick = () => activateChat(item);
-    return button;
+    button.onclick = () => openConversation(item.id);
+    card.append(chatCheckbox(item), button);
+    return card;
   }) : [];
   $("conversations").replaceChildren(...(visible.length
     ? chatView === "table" ? [renderChatTable(visible)] : cards
     : [emptyState(conversations.length ? "No conversations match these Chat Memory filters." : "Captured conversations will appear here after the extension sends them to Memory.")]));
+  scheduleNewChatExpiry();
   renderDashboard();
 }
 
@@ -3049,6 +3123,7 @@ function renderTranscriptMessages(sourceEventId) {
 }
 
 async function openConversation(id, options = {}) {
+  if (markChatSeen(id)) render();
   const data = isPreview ? { conversation: conversations.find((item) => item.id === id) } : await api(`/v1/conversations/${id}?workspaceId=${workspace.id}`);
   selected = data.conversation;
   if (!selected) return;
@@ -3122,7 +3197,7 @@ $("chatSort").onchange=()=>{ chatSort=$("chatSort").value; localStorage.setItem(
 $("chatGridView").onclick=()=>{ chatView="grid"; localStorage.setItem("sherry_chat_view", chatView); render(); };
 $("chatTableView").onclick=()=>{ chatView="table"; localStorage.setItem("sherry_chat_view", chatView); render(); };
 $("refreshChatMemory").onclick=refreshChatMemory;
-$("selectChats").onclick=()=>{ selectingChats=!selectingChats; if(!selectingChats) selectedChatIds.clear(); $("chatBulkStatus").textContent=""; render(); };
+document.addEventListener("visibilitychange", () => { if (!document.hidden && workspace) render(); });
 $("selectVisibleChats").onclick=()=>{ for(const chat of filteredConversations()) selectedChatIds.add(chat.id); render(); };
 $("clearSelectedChats").onclick=()=>{ selectedChatIds.clear(); render(); };
 $("deleteSelectedChats").onclick=()=>openBulkDeleteDialog([...selectedChatIds], false);

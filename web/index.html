@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Sherry — Shared AI memory</title>
-  <link rel="stylesheet" href="styles.css?v=20261005-chat-library-2">
+  <link rel="stylesheet" href="styles.css?v=20261005-new-chat-1">
 </head>
 <body>
   <main id="shell" class="shell">
@@ -51,7 +51,7 @@
         </div>
 
         <div id="memoryView" class="view-panel hidden">
-          <div class="page-heading dashboard-heading"><div><h2>Chat Memory</h2><p class="muted">Search within Chat Memory. Filters below only affect this section.</p></div><div class="chat-refresh-actions"><button id="refreshChatMemory" class="secondary" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M5.8 9A7 7 0 0 1 18 6.8L20 12M4 12l2 5.2A7 7 0 0 0 18.2 15"/></svg><span>Refresh</span></button><span id="chatMemoryRefreshStatus" class="chat-refresh-status" role="status" aria-live="polite"></span></div></div>
+          <div class="page-heading dashboard-heading"><div><h2>Chat Memory</h2><p class="muted">Search within Chat Memory. Filters below only affect this section.</p></div><div class="chat-refresh-actions"><button id="refreshChatMemory" class="secondary" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.9-3M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4"/></svg><span>Refresh</span></button><span id="chatMemoryRefreshStatus" class="chat-refresh-status" role="status" aria-live="polite"></span></div></div>
           <div class="section-search card">
             <label class="search-field"><span class="sr-only">Search Chat Memory</span><input id="conversationSearch" type="search" placeholder="Search chats, titles, summaries, and message content…"></label>
             <div class="filter-row" aria-label="Chat Memory filters">
@@ -78,7 +78,7 @@
             <div id="customDateFields" class="custom-date-fields hidden" aria-label="Custom date range"><label>From<input id="dateFrom" type="date"></label><label>To<input id="dateTo" type="date"></label><button id="clearCustomDates" class="quiet" type="button">Clear dates</button></div>
           </div>
           <p id="memoryDataSource" class="data-source-note hidden"><span class="status-pill provisional">Sample data</span>This local file preview is not connected to your account.</p>
-          <div class="chat-list-toolbar"><span id="status" class="status">Loading your memory…</span><div class="chat-list-controls"><label class="chat-sort-label">Sort by<select id="chatSort"><option value="recent">Recent activity</option><option value="oldest">Oldest activity</option><option value="title-asc">Title A–Z</option><option value="title-desc">Title Z–A</option><option value="most-messages">Most messages</option></select></label><div class="segmented-control chat-view-switch" role="group" aria-label="Chat view"><button id="chatGridView" class="active-segment" type="button" aria-pressed="true">Grid</button><button id="chatTableView" type="button" aria-pressed="false">Table</button></div><button id="selectChats" class="quiet chat-select-action" type="button" aria-pressed="false">Select chats</button></div></div>
+          <div class="chat-list-toolbar"><span id="status" class="status">Loading your memory…</span><div class="chat-list-controls"><label class="chat-sort-label">Sort by<select id="chatSort"><option value="recent">Recent activity</option><option value="oldest">Oldest activity</option><option value="title-asc">Title A–Z</option><option value="title-desc">Title Z–A</option><option value="most-messages">Most messages</option></select></label><div class="segmented-control chat-view-switch" role="group" aria-label="Chat view"><button id="chatGridView" class="active-segment" type="button" aria-pressed="true">Grid</button><button id="chatTableView" type="button" aria-pressed="false">Table</button></div></div></div>
           <div id="chatSelectionActions" class="chat-selection-actions hidden"><span id="chatSelectionCount" role="status">0 chats selected</span><button id="selectVisibleChats" class="secondary" type="button">Select visible</button><button id="clearSelectedChats" class="secondary" type="button">Clear selection</button><button id="deleteSelectedChats" class="danger" type="button" disabled>Delete selected</button></div>
           <p id="chatBulkStatus" class="field-help" role="status" aria-live="polite"></p><div id="conversations" class="conversation-grid"></div>
         </div>
@@ -125,6 +125,6 @@
   <script src="import-integrity.js?v=20260929-gate9-readback-1"></script>
   <script src="graph-connections.js?v=20260925-retire-claims-1"></script>
   <script src="transcript-order.js?v=20260928-turn-order-1"></script>
-  <script src="app.js?v=20261005-chat-library-1"></script>
+  <script src="app.js?v=20261005-new-chat-1"></script>
 </body>
 </html>

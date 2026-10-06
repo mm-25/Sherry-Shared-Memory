@@ -62,9 +62,10 @@ test("conversation list orders imported chats by source activity", async () => {
     if (url.includes("/rest/v1/conversations?")) {
       const query = new URL(url).searchParams;
       assert.match(query.get("select"), /conversation_events\(count\)/);
+      assert.match(query.get("select"), /created_at/);
       return Response.json([
         { id: "old-import", last_captured_at: "2026-09-24T14:00:00Z", conversation_events: [{ count: 4 }] },
-        { id: "newer-chat", last_captured_at: "2026-09-20T14:00:00Z", conversation_events: [{ count: 2 }] }
+        { id: "newer-chat", created_at: "2026-10-05T20:00:00Z", last_captured_at: "2026-09-20T14:00:00Z", conversation_events: [{ count: 2 }] }
       ]);
     }
     if (url.includes("/rest/v1/rpc/conversation_activity_rollup")) return Response.json([
@@ -80,6 +81,7 @@ test("conversation list orders imported chats by source activity", async () => {
   assert.equal(response.status, 200);
   const { conversations } = await response.json();
   assert.deepEqual(conversations.map((item) => item.id), ["newer-chat", "old-import"]);
+  assert.equal(conversations[0].created_at, "2026-10-05T20:00:00Z");
   assert.equal(conversations[1].last_activity_at, "2023-01-02T08:00:00.000Z");
   assert.equal(conversations[1].last_captured_at, "2026-09-24T14:00:00Z");
   assert.equal("source_activity" in conversations[1], false);

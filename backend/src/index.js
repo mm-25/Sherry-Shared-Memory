@@ -69,7 +69,7 @@ async function ownedWorkspace(userId, workspaceId, env, fetchImpl) {
 async function listConversations(workspaceId, env, fetchImpl) {
   const [rows, rollups] = await Promise.all([
     supabaseJson(
-      `conversations?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,provider,provider_conversation_id,provider_family,product,primary_surface,title,canonical_chat_url,first_captured_at,last_captured_at,conversation_events(count)`,
+      `conversations?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,provider,provider_conversation_id,provider_family,product,primary_surface,title,canonical_chat_url,first_captured_at,last_captured_at,created_at,conversation_events(count)`,
       env,
       fetchImpl
     ),
