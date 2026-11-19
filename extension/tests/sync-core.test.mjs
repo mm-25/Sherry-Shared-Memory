@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createCaptureBatches,
+  createConversationRepairBatches,
   isPermanentUploadStatus,
   normalizeIngestionEndpoint,
   retryDelayMs,
   sanitizeCaptureEvent,
+  selectConversationCaptures,
   syncLimits,
   trimUploadQueue,
   uploadFailureAction
@@ -45,6 +47,24 @@ test("splits batches at the server event limit and preserves provider groups", (
   assert.equal(batches[0].surface, "web");
   assert.equal(batches[0].captureClient.type, "browser_dom");
   assert.equal(batches[0].coverage.state, "complete_observed_range");
+});
+
+test("repair upload selects only local captures from the open conversation", () => {
+  const events = [
+    { provider: "gemini", conversationId: "affected", eventId: "evt_1" },
+    { provider: "gemini", conversationId: "other", eventId: "evt_2" },
+    { provider: "chatgpt", conversationId: "affected", eventId: "evt_3" },
+    { provider: "gemini", conversationId: "affected", eventId: "evt_4" }
+  ];
+  assert.deepEqual(selectConversationCaptures(events, "gemini", "affected").map((event) => event.eventId), ["evt_1", "evt_4"]);
+  assert.throws(() => selectConversationCaptures(events, "gemini", ""), /supported conversation/);
+  const batches = createConversationRepairBatches(events, { workspaceId }, "gemini", "affected", {
+    createId: () => "repair-batch",
+    now: () => "2026-10-01T14:00:00.000Z"
+  });
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].reason, "repair_backfill");
+  assert.deepEqual(batches[0].events.map((event) => event.eventId), ["evt_1", "evt_4"]);
 });
 
 test("uses bounded exponential retry delays", () => {

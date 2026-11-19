@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src https://zwpzmmfpgjaaikacoqas.supabase.co; form-action 'self'; base-uri 'none'; object-src 'none'">
+  <title>Reset your password · Sherry</title>
+  <link rel="stylesheet" href="account-security.css?v=20261028-1">
+  <script src="auth-session.js?v=20261028-recovery-resume-1" defer></script>
+  <script src="account-security.js?v=20261028-recovery-resume-1" defer></script>
+</head>
+<body>
+  <main class="account-card">
+    <a class="brand" href="/">Sherry</a>
+    <h1 id="accountTitle">Reset your password</h1>
+    <p id="accountDescription">We’ll email you a link to choose a new Sherry password.</p>
+    <p id="accountStatus" role="status" aria-live="polite"></p>
+    <button id="retryRecovery" type="button" hidden>Try checking this link again</button>
+    <form id="recoveryEmailForm">
+      <label for="recoveryEmail">Sherry account email</label>
+      <input id="recoveryEmail" type="email" autocomplete="email" required>
+      <button id="sendRecovery" type="submit">Send reset email</button>
+    </form>
+    <form id="newPasswordForm" hidden>
+      <label for="newPassword">New password</label>
+      <input id="newPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required>
+      <p class="help">Use at least 12 characters. Keep this tab open until you finish. You can refresh this same tab within 15 minutes without requesting another email.</p>
+      <label for="confirmPassword">Confirm new password</label>
+      <input id="confirmPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required>
+      <label class="checkbox"><input id="signOutOthers" type="checkbox" checked><span>Sign out other devices</span></label>
+      <p class="help">Those devices may need to sign in again. Their saved captures remain. Existing access can take time to expire; AI connections are managed separately.</p>
+      <button id="savePassword" type="submit">Save new password</button>
+    </form>
+    <a id="backToSherry" class="back-link" href="/">Back to Sherry</a>
+  </main>
+</body>
+</html>

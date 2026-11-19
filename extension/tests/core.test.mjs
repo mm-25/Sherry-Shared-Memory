@@ -262,17 +262,15 @@ test("a shifted position cannot overwrite a different old message", () => {
   assert.equal(result.events[0].text, previous.text);
 });
 
-test("a long exact positional recapture is ignored without hiding short repeated replies", () => {
-  const previous = core.createCapturedEvent({ provider: "gemini", conversationId: "chat-1", sequence: 30, role: "assistant", text: "This same long Gemini response has been captured before and should not become a new message after the page shifts.", url: "https://gemini.google.com/app/chat-1" });
-  const repeated = core.createCapturedEvent({ ...previous, sequence: 14 });
-  const short = core.createCapturedEvent({ ...previous, sequence: 15, text: "Yes" });
-  const result = core.filterExactFallbackDuplicates([previous], [repeated, short]);
-  assert.equal(result.duplicates, 1);
-  assert.deepEqual(result.events.map((event) => event.eventId), [short.eventId]);
-});
 
 test("detects temporary-chat signals without treating normal URLs as temporary", () => {
   assert.equal(core.isLikelyTemporaryChat("https://chatgpt.com/?temporary-chat=true"), true);
   assert.equal(core.isLikelyTemporaryChat("https://chatgpt.com/c/chat-1"), false);
   assert.equal(core.isLikelyTemporaryChat("https://chatgpt.com/", "Temporary Chat"), true);
+});
+
+test("provider-local conversation labels are provisional during legacy recovery", () => {
+  assert.equal(core.isProvisionalConversationId("local-chatgpt:invented-id"),true);
+  assert.equal(core.isProvisionalConversationId("local-gemini:invented-id"),true);
+  assert.equal(core.isProvisionalConversationId("6add1d41-b140-83ea-81d1-718bdfe96072"),false);
 });

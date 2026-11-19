@@ -5,6 +5,14 @@
     return event?.message_timestamp || event?.first_captured_at || event?.captured_at || null;
   }
 
+  function observationLabel(event) {
+    if (event?.message_timestamp) return "Sent";
+    if (event?.capture_evidence?.timestampBasis === "observed" || /^android-(session|chatgpt):/.test(event?.source_locator || "")) {
+      return "Original date unknown · observed";
+    }
+    return "Captured";
+  }
+
   function sort(events, direction = "latest") {
     const latestFirst = direction !== "oldest";
     const entries = events.map((event, index) => ({ event, index, time: Date.parse(messageTime(event) || ""), sequence: Number(event?.sequence) }));
@@ -25,5 +33,5 @@
       .map(({ event }) => event);
   }
 
-  globalThis.SherryTranscriptOrder = Object.freeze({ messageTime, sort });
+  globalThis.SherryTranscriptOrder = Object.freeze({ messageTime, observationLabel, sort });
 })();

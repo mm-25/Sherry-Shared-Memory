@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries><package android:name="com.openai.chatgpt" /></queries>
+    <!-- Temporary test host only: no launcher, service, receiver or network permission. -->
+    <application android:label="Sherry test host" android:allowBackup="false" android:usesCleartextTraffic="false" />
+</manifest>

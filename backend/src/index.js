@@ -1,3 +1,5 @@
+import { sourceMetadataFor } from "./source-metadata.js";
+import { captureEvidenceFor } from "./capture-evidence.js";
 import { captureLimits, validateCaptureBatch } from "./validation.js";
 import { redactCaptureBatch } from "./redaction.js";
 import { getSummarizerSettings, saveSummarizerSettings, validateSummarizerSettings } from "./settings.js";
@@ -10,6 +12,7 @@ import {
 } from "./memory-review.js";
 import { ensureRetrievalPermission, getSensitivitySettings, listConnections, searchMemory, updateSensitivitySettings, upsertRetrievalPermission } from "./retrieval.js";
 import { activityFromEvents, conversationActivity, orderTranscriptEvents, transcriptCoverage } from "./conversation-activity.js";
+import { existingAccountDeletion, processAccountDeletion, reconcileAccountDeletions, requestAccountDeletion } from "./account-deletion.js";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
@@ -57,6 +60,18 @@ async function supabaseJson(path, env, fetchImpl, options = {}) {
   return body ? JSON.parse(body) : null;
 }
 
+async function supabaseAllRows(path, env, fetchImpl) {
+  const rows = [];
+  const pageSize = 1000;
+  const separator = path.includes("?") ? "&" : "?";
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await supabaseJson(`${path}${separator}limit=${pageSize}&offset=${offset}`, env, fetchImpl);
+    if (!Array.isArray(page)) throw new Error("Expected a database row list.");
+    rows.push(...page);
+    if (page.length < pageSize) return rows;
+  }
+}
+
 async function ownedWorkspace(userId, workspaceId, env, fetchImpl) {
   const rows = await supabaseJson(
     `workspaces?id=eq.${encodeURIComponent(workspaceId)}&owner_user_id=eq.${encodeURIComponent(userId)}&select=id`,
@@ -68,8 +83,8 @@ async function ownedWorkspace(userId, workspaceId, env, fetchImpl) {
 
 async function listConversations(workspaceId, env, fetchImpl) {
   const [rows, rollups] = await Promise.all([
-    supabaseJson(
-      `conversations?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,provider,provider_conversation_id,provider_family,product,primary_surface,title,canonical_chat_url,first_captured_at,last_captured_at,conversation_events(count)`,
+    supabaseAllRows(
+      `conversations?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,provider,provider_conversation_id,provider_family,product,primary_surface,title,source_metadata,source_metadata_observed_at,canonical_chat_url,first_captured_at,last_captured_at,created_at,conversation_events(count)&order=id.asc`,
       env,
       fetchImpl
     ),
@@ -251,16 +266,23 @@ export function buildDashboardMetrics({ conversations = [], checkpoints = [], re
 
   const retrievalByTool = new Map();
   const memoryUses = new Map();
+  let currentMemoryLookups = 0;
   for (const request of retrievalRequests) {
-    addCount(retrievalByTool, request.provider || "unknown");
+    const seen = new Set();
     for (const reference of Array.isArray(request.result_refs) ? request.result_refs : []) {
-      if (!reference?.id || !reference?.type || reference.type === "claim") continue;
-      const key = `${reference.type}:${reference.id}`;
-      memoryUses.set(key, {
-        id: String(reference.id),
-        type: String(reference.type),
-        count: (memoryUses.get(key)?.count || 0) + 1
-      });
+      if (reference?.id == null || !reference?.type) continue;
+      const id = String(reference.id);
+      const exists = reference.type === "note" ? noteById.has(id)
+        : reference.type === "summary" ? checkpointById.has(id)
+        : reference.type === "excerpt" ? chunkById.has(id) : false;
+      const key = `${reference.type}:${id}`;
+      if (!exists || seen.has(key)) continue;
+      seen.add(key);
+      memoryUses.set(key, { id, type: reference.type, count: (memoryUses.get(key)?.count || 0) + 1 });
+    }
+    if (seen.size) {
+      currentMemoryLookups += 1;
+      addCount(retrievalByTool, request.provider || "unknown");
     }
   }
 
@@ -308,7 +330,7 @@ export function buildDashboardMetrics({ conversations = [], checkpoints = [], re
     useCases: useCases.slice(0, 8),
     summaryCoverage: { summarizedChats: new Set(checkpoints.map((item) => item.conversation_id).filter(Boolean)).size, capturedChats: conversations.length },
     retrieval: {
-      total: retrievalRequests.length,
+      total: currentMemoryLookups,
       byTool: sortedBreakdown(retrievalByTool, "tool"),
       mostUsedMemories
     },
@@ -349,12 +371,30 @@ async function dashboardMetrics(workspaceId, env, fetchImpl) {
   for (const request of retrievalRequests) for (const ref of Array.isArray(request.result_refs) ? request.result_refs : []) {
     if (ref?.type === "excerpt" && ref.id != null) excerptCounts.set(String(ref.id), (excerptCounts.get(String(ref.id)) || 0) + 1);
   }
-  const excerptIds = [...excerptCounts].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id]) => id);
-  const textChunks = excerptIds.length ? await supabaseJson(
-    `text_chunks?workspace_id=eq.${encodedWorkspaceId}&id=in.(${excerptIds.map(encodeURIComponent).join(",")})&select=id,conversation_id,source_event_id,content,conversations(id,title,provider,product)`,
-    env,
-    fetchImpl
-  ) : [];
+  const orderedIds = [...excerptCounts].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+  const textChunks = [];
+  // Resolve current sources before ranking: deleted popular IDs must not fill
+  // the five display slots and hide a still-present lower-frequency source.
+  if (conversations.length) for (let offset = 0; offset < orderedIds.length; offset += 300) {
+    const ids = orderedIds.slice(offset, offset + 300);
+    textChunks.push(...await supabaseJson(
+      `text_chunks?workspace_id=eq.${encodedWorkspaceId}&id=in.(${ids.map(encodeURIComponent).join(",")})&select=id,conversation_id`,
+      env, fetchImpl
+    ));
+  }
+  const currentIds = new Set(textChunks.map((chunk) => String(chunk.id)));
+  const excerptIds = orderedIds.filter((id) => currentIds.has(id)).slice(0, 5);
+  if (excerptIds.length) {
+    const details = await supabaseJson(
+      `text_chunks?workspace_id=eq.${encodedWorkspaceId}&id=in.(${excerptIds.map(encodeURIComponent).join(",")})&select=id,conversation_id,source_event_id,content,conversations(id,title,provider,product)`,
+      env, fetchImpl
+    );
+    const byId = new Map(details.map((chunk) => [String(chunk.id), chunk]));
+    for (let index = 0; index < textChunks.length; index += 1) {
+      textChunks[index] = byId.get(String(textChunks[index].id)) || textChunks[index];
+    }
+  }
+
   return buildDashboardMetrics({ conversations, checkpoints, retrievalRequests, notes, textChunks });
 }
 
@@ -416,7 +456,9 @@ async function diagnosticsStatus(workspaceId, env, fetchImpl) {
       severity: "error",
       title: "Some conversations are not being summarized",
       message: `${activeFailures.length} conversation${activeFailures.length === 1 ? " has" : "s have"} a failed latest summary. Memory will not spend more model tokens on unchanged input.`,
-      action: "Add or edit a source message, change the summarizer configuration, or wait for a repaired runtime before retrying.",
+      action: codes.includes("provider_authentication_failed")
+        ? "Replace the saved summarization API key in Settings, then run the next summary."
+        : "Add or edit a source message, change the summarizer configuration, or wait for a repaired runtime before retrying.",
       codes,
       latestAt: activeFailures[0]?.created_at || null
     });
@@ -459,17 +501,17 @@ async function diagnosticsStatus(workspaceId, env, fetchImpl) {
 
 async function conversationDetail(workspaceId, conversationId, env, fetchImpl) {
   const conversations = await supabaseJson(
-    `conversations?id=eq.${encodeURIComponent(conversationId)}&workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,provider,provider_conversation_id,title,canonical_chat_url,first_captured_at,last_captured_at,coverage_state,gap_detected,backfill_available`,
+    `conversations?id=eq.${encodeURIComponent(conversationId)}&workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,provider,provider_conversation_id,title,canonical_chat_url,first_captured_at,last_captured_at,coverage_state,gap_detected,backfill_available,source_metadata,source_metadata_observed_at`,
     env,
     fetchImpl
   );
   if (!conversations.length) return null;
-  const events = await supabaseJson(
-    `conversation_events?conversation_id=eq.${encodeURIComponent(conversationId)}&workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,event_key,provider_message_id,sequence,role,text_content,source_url,source_locator,message_timestamp,captured_at,first_captured_at,revision,raw_object_key,coverage_state&order=first_captured_at.asc`,
+  const events = await supabaseAllRows(
+    `conversation_events?conversation_id=eq.${encodeURIComponent(conversationId)}&workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,event_key,provider_message_id,sequence,role,text_content,source_url,source_locator,message_timestamp,captured_at,first_captured_at,created_at,revision,raw_object_key,coverage_state,capture_evidence,source_metadata&order=id.asc`,
     env,
     fetchImpl
   );
-  return { ...conversations[0], ...activityFromEvents(conversations[0], events), transcriptCoverage: transcriptCoverage(conversations[0], events), events: orderTranscriptEvents(events) };
+  return { ...conversations[0], ...activityFromEvents(conversations[0], events), transcriptCoverage: transcriptCoverage(conversations[0], events), events: orderTranscriptEvents(events).map(event => ({ ...event, capture_evidence: captureEvidenceFor(event), source_metadata: sourceMetadataFor(event) })) };
 }
 
 async function conversationEventIdentities(workspaceId, conversationId, env, fetchImpl) {
@@ -482,13 +524,13 @@ async function conversationEventIdentities(workspaceId, conversationId, env, fet
   const pageSize = 1000;
   for (let offset = 0; ; offset += pageSize) {
     const page = await supabaseJson(
-      `conversation_events?conversation_id=eq.${encodeURIComponent(conversationId)}&workspace_id=eq.${encodeURIComponent(workspaceId)}&select=provider_message_id,role&order=id.asc&limit=${pageSize}&offset=${offset}`,
+      `conversation_events?conversation_id=eq.${encodeURIComponent(conversationId)}&workspace_id=eq.${encodeURIComponent(workspaceId)}&select=provider_message_id,role,sequence,message_timestamp,text_content&order=id.asc&limit=${pageSize}&offset=${offset}`,
       env, fetchImpl
     );
     events.push(...page);
     if (page.length < pageSize) break;
   }
-  return { conversation: conversations[0], events };
+  return { verificationVersion: 2, conversation: conversations[0], events };
 }
 
 async function rewriteArchiveWithoutConversation(objectKey, providerConversationId, env) {
@@ -497,9 +539,12 @@ async function rewriteArchiveWithoutConversation(objectKey, providerConversation
   const archive = await object.json();
   if (!Array.isArray(archive.events)) throw new Error("Raw archive has no event list");
   const remaining = archive.events.filter((event) => event.conversationId !== providerConversationId);
-  if (remaining.length === archive.events.length) return { unchanged: true };
+  if (archive.conversationUpdates !== undefined && !Array.isArray(archive.conversationUpdates)) throw new Error("Raw archive has invalid conversation updates");
+  const remainingUpdates = (archive.conversationUpdates || []).filter(update => update.conversationId !== providerConversationId);
+  if (remaining.length === archive.events.length && remainingUpdates.length === (archive.conversationUpdates || []).length) return { unchanged: true };
   archive.events = remaining;
-  if (archive.events.length === 0) {
+  if (archive.conversationUpdates) archive.conversationUpdates = remainingUpdates;
+  if (archive.events.length === 0 && remainingUpdates.length === 0) {
     await env.RAW_MEMORY.delete(objectKey);
     return { deleted: true, sha256: null, bytes: 0 };
   }
@@ -513,7 +558,7 @@ async function rewriteArchiveWithoutConversation(objectKey, providerConversation
     deleted: false,
     sha256,
     bytes: new TextEncoder().encode(body).byteLength,
-    providerConversationIds: [...new Set(remaining.map((event) => event.conversationId))]
+    providerConversationIds: [...new Set([...remaining, ...remainingUpdates].map((event) => event.conversationId))]
   };
 }
 
@@ -536,64 +581,52 @@ async function archiveKeysForConversation(workspaceId, provider, providerConvers
   return keys;
 }
 
-async function updateArchiveBatchMetadata(workspaceId, archiveResults, env, fetchImpl) {
-  for (const archive of archiveResults) {
-    const batchPath = `ingestion_batches?workspace_id=eq.${encodeURIComponent(workspaceId)}&raw_object_key=eq.${encodeURIComponent(archive.key)}`;
-    if (archive.unchanged) continue;
-    if (archive.missing) {
-      const references = await supabaseJson(
-        `conversation_events?workspace_id=eq.${encodeURIComponent(workspaceId)}&raw_object_key=eq.${encodeURIComponent(archive.key)}&select=id&limit=1`,
-        env, fetchImpl
-      );
-      if (references.length) continue;
-    }
-    if (archive.deleted || archive.missing) {
-      await supabaseJson(batchPath, env, fetchImpl, { method: "DELETE" });
-    } else {
-      await supabaseJson(batchPath, env, fetchImpl, {
-        method: "PATCH",
-        headers: { "content-type": "application/json", prefer: "return=minimal" },
-        body: JSON.stringify({ payload_sha256: archive.sha256, payload_bytes: archive.bytes, provider_conversation_ids: archive.providerConversationIds })
-      });
-    }
-  }
+async function finishArchiveChunk(workspaceId, provider, sourceId, operationId, results, env, fetchImpl) {
+  const result = await supabaseJson("rpc/finish_chat_archive_chunk", env, fetchImpl, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ p_workspace_id: workspaceId, p_provider: provider,
+      p_source_id: sourceId, p_operation_id: operationId, p_results: results })
+  });
+  if (typeof result?.pending !== "boolean") throw new Error("Archive cleanup receipt is missing");
+  return result;
 }
 
-async function markArchiveReconciled(workspaceId, provider, providerConversationId, env, fetchImpl) {
+async function freezeArchiveCleanup(workspaceId, provider, sourceId, keys, operationId, env, fetchImpl) {
   await supabaseJson(
-    `deleted_conversations?workspace_id=eq.${encodeURIComponent(workspaceId)}&provider=eq.${encodeURIComponent(provider)}&provider_conversation_id=eq.${encodeURIComponent(providerConversationId)}`,
-    env, fetchImpl,
-    {
-      method: "PATCH",
-      headers: { "content-type": "application/json", prefer: "return=minimal" },
-      body: JSON.stringify({ archive_reconciled_at: new Date().toISOString() })
-    }
+    `deleted_conversations?workspace_id=eq.${encodeURIComponent(workspaceId)}&provider=eq.${encodeURIComponent(provider)}&provider_conversation_id=eq.${encodeURIComponent(sourceId)}&archive_cleanup_keys=is.null${operationId ? `&operation_id=eq.${encodeURIComponent(operationId)}` : ""}`,
+    env, fetchImpl, { method: "PATCH", headers: { "content-type": "application/json", prefer: "return=minimal" },
+      body: JSON.stringify({ archive_cleanup_keys: [...keys] }) }
   );
 }
 
 async function deleteConversation(workspaceId, conversationId, env, fetchImpl) {
   const detail = await conversationDetail(workspaceId, conversationId, env, fetchImpl);
   if (!detail) return null;
-  const keySet = await archiveKeysForConversation(workspaceId, detail.provider, detail.provider_conversation_id, env, fetchImpl);
-  for (const event of detail.events) if (event.raw_object_key) keySet.add(event.raw_object_key);
-  const keys = [...keySet];
+  const operationId = crypto.randomUUID();
   // Record the deletion before touching external storage. If R2 fails, the
   // scheduled reconciler can finish from this durable tombstone.
   await supabaseJson("deleted_conversations", env, fetchImpl, {
     method: "POST",
     headers: { "content-type": "application/json", prefer: "return=minimal,resolution=merge-duplicates" },
-    body: JSON.stringify({ workspace_id: workspaceId, provider: detail.provider, provider_conversation_id: detail.provider_conversation_id })
+    body: JSON.stringify({ workspace_id: workspaceId, provider: detail.provider,
+      provider_conversation_id: detail.provider_conversation_id, operation_id: operationId,
+      deleted_at: new Date().toISOString(), archive_reconciled_at: null, archive_cleanup_keys: null })
   });
   await supabaseJson(`conversations?id=eq.${encodeURIComponent(conversationId)}&workspace_id=eq.${encodeURIComponent(workspaceId)}`, env, fetchImpl, { method: "DELETE" });
   try {
+    // Discover committed old copies after the deletion boundary is in place.
+    const keySet = await archiveKeysForConversation(workspaceId, detail.provider, detail.provider_conversation_id, env, fetchImpl);
+    for (const event of detail.events) if (event.raw_object_key) keySet.add(event.raw_object_key);
+    const keys = [...keySet];
+    await freezeArchiveCleanup(workspaceId, detail.provider, detail.provider_conversation_id, keys, operationId, env, fetchImpl);
     const archiveResults = [];
-    for (const key of keys) {
+    for (const key of keys.slice(0, 100)) {
       const archive = await rewriteArchiveWithoutConversation(key, detail.provider_conversation_id, env);
       archiveResults.push({ key, ...archive });
     }
-    await updateArchiveBatchMetadata(workspaceId, archiveResults, env, fetchImpl);
-    await markArchiveReconciled(workspaceId, detail.provider, detail.provider_conversation_id, env, fetchImpl);
-    return { id: conversationId, rawArchivesUpdated: archiveResults.filter((archive) => archive.deleted || archive.sha256).length, cleanupPending: false };
+    const receipt = await finishArchiveChunk(workspaceId, detail.provider, detail.provider_conversation_id,
+      operationId, archiveResults, env, fetchImpl);
+    return { id: conversationId, rawArchivesUpdated: archiveResults.filter((archive) => archive.deleted || archive.sha256).length, cleanupPending: receipt.pending };
   } catch (error) {
     console.error(JSON.stringify({ level: "error", event: "conversation_archive_cleanup_pending", conversationId, message: error?.message || "Unknown error" }));
     return { id: conversationId, rawArchivesUpdated: 0, cleanupPending: true };
@@ -602,23 +635,33 @@ async function deleteConversation(workspaceId, conversationId, env, fetchImpl) {
 
 export async function reconcileDeletedArchives(env, fetchImpl = globalThis.fetch) {
   const tombstones = await supabaseJson(
-    "deleted_conversations?archive_reconciled_at=is.null&select=id,workspace_id,provider,provider_conversation_id&order=deleted_at.asc,id.asc&limit=10",
+    "deleted_conversations?archive_reconciled_at=is.null&select=id,workspace_id,provider,provider_conversation_id,operation_id,archive_cleanup_keys&order=deleted_at.asc,id.asc&limit=5",
     env, fetchImpl
   );
   let reconciled = 0;
+  let archiveBudget = 100;
   for (const tombstone of tombstones) {
+    if (archiveBudget <= 0) break;
     try {
       const active = await supabaseJson(
         `conversations?workspace_id=eq.${encodeURIComponent(tombstone.workspace_id)}&provider=eq.${encodeURIComponent(tombstone.provider)}&provider_conversation_id=eq.${encodeURIComponent(tombstone.provider_conversation_id)}&select=id&limit=1`,
         env, fetchImpl
       );
       if (active.length) continue;
-      const keys = await archiveKeysForConversation(tombstone.workspace_id, tombstone.provider, tombstone.provider_conversation_id, env, fetchImpl);
+      const keys = Array.isArray(tombstone.archive_cleanup_keys) ? new Set(tombstone.archive_cleanup_keys)
+        : await archiveKeysForConversation(tombstone.workspace_id, tombstone.provider, tombstone.provider_conversation_id, env, fetchImpl);
+      if (!Array.isArray(tombstone.archive_cleanup_keys)) {
+        await freezeArchiveCleanup(tombstone.workspace_id, tombstone.provider, tombstone.provider_conversation_id,
+          keys, tombstone.operation_id, env, fetchImpl);
+      }
       const results = [];
-      for (const key of keys) results.push({ key, ...await rewriteArchiveWithoutConversation(key, tombstone.provider_conversation_id, env) });
-      await updateArchiveBatchMetadata(tombstone.workspace_id, results, env, fetchImpl);
-      await markArchiveReconciled(tombstone.workspace_id, tombstone.provider, tombstone.provider_conversation_id, env, fetchImpl);
-      reconciled += 1;
+      for (const key of [...keys].slice(0, archiveBudget)) {
+        archiveBudget -= 1;
+        results.push({ key, ...await rewriteArchiveWithoutConversation(key, tombstone.provider_conversation_id, env) });
+      }
+      const receipt = await finishArchiveChunk(tombstone.workspace_id, tombstone.provider,
+        tombstone.provider_conversation_id, tombstone.operation_id, results, env, fetchImpl);
+      if (!receipt.pending) reconciled += 1;
     } catch (error) {
       console.error(JSON.stringify({ level: "error", event: "archive_reconciliation_failed", tombstoneId: tombstone.id, message: error?.message || "Unknown error" }));
     }
@@ -626,15 +669,21 @@ export async function reconcileDeletedArchives(env, fetchImpl = globalThis.fetch
   return { checked: tombstones.length, reconciled };
 }
 
-async function omitDeletedConversations(batch, env, fetchImpl) {
+async function captureDeletionState(batch, env, fetchImpl) {
+  const sources = new Set([...batch.events, ...(batch.conversationUpdates || [])].map((event) => event.conversationId));
+  const sourceFilter = encodeURIComponent(`(${[...sources].map((id) => JSON.stringify(id)).join(",")})`);
   const rows = await supabaseJson(
-    `deleted_conversations?workspace_id=eq.${encodeURIComponent(batch.workspaceId)}&provider=eq.${encodeURIComponent(batch.provider)}&select=provider_conversation_id`,
+    `deleted_conversations?workspace_id=eq.${encodeURIComponent(batch.workspaceId)}&provider=eq.${encodeURIComponent(batch.provider)}&provider_conversation_id=in.${sourceFilter}&select=provider_conversation_id,operation_id,archive_reconciled_at`,
     env,
     fetchImpl
   );
-  const deleted = new Set(rows.map((row) => row.provider_conversation_id));
-  const events = batch.events.filter((event) => !deleted.has(event.conversationId));
-  return { ...batch, events, omitted: batch.events.length - events.length };
+  const relevant = rows.filter((row) => sources.has(row.provider_conversation_id));
+  return {
+    pending: relevant.some((row) => !row.archive_reconciled_at),
+    operations: new Map(relevant.map((row) => [row.provider_conversation_id, row.operation_id])),
+    archiveGeneration: relevant.length ? (await sha256Hex(JSON.stringify(relevant
+      .map((row) => [row.provider_conversation_id, row.operation_id]).sort()))).slice(0, 32) : null
+  };
 }
 
 function jsonResponse(body, status = 200, headers = {}) {
@@ -698,17 +747,19 @@ async function sha256Hex(value) {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function rawObjectKey(batch) {
+function rawObjectKey(batch, archiveGeneration = null) {
   const date = new Date(batch.clientCreatedAt);
   const year = String(date.getUTCFullYear()).padStart(4, "0");
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const day = String(date.getUTCDate()).padStart(2, "0");
-  return `${batch.workspaceId}/${batch.provider}/${year}/${month}/${day}/${batch.batchId}.json`;
+  return `${batch.workspaceId}/${batch.provider}/${year}/${month}/${day}/${archiveGeneration ? `recapture-${archiveGeneration}/` : ""}${batch.batchId}.json`;
 }
 
 async function commitMetadata(batch, metadata, env, fetchImpl) {
   const isV2 = batch.schemaVersion === 2;
-  return fetchImpl(`${env.SUPABASE_URL}/rest/v1/rpc/${isV2 ? "ingest_capture_batch_v2" : "ingest_capture_batch"}`, {
+  const hasSourceMetadata = batch.events.some(event => event.sourceMetadata) || Boolean(batch.conversationUpdates?.length);
+  const rpc = hasSourceMetadata ? "ingest_capture_batch_v2_source_metadata" : batch.events.some(event => event.captureEvidence) ? "ingest_capture_batch_v2_evidence" : isV2 ? "ingest_capture_batch_v2" : "ingest_capture_batch";
+  return fetchImpl(`${env.SUPABASE_URL}/rest/v1/rpc/${rpc}`, {
     method: "POST",
     headers: {
       apikey: supabaseSecretKey(env),
@@ -731,7 +782,10 @@ async function commitMetadata(batch, metadata, env, fetchImpl) {
       p_payload_sha256: metadata.payloadSha256,
       p_payload_bytes: metadata.payloadBytes,
       p_redaction_summary: metadata.redactionSummary,
-      p_events: batch.events
+      ...(hasSourceMetadata ? {p_conversation_updates: (batch.conversationUpdates || []).map(update => ({...update,
+        _sherryDeletionOperation: metadata.deletionOperations?.get(update.conversationId) || "initial"}))} : {}),
+      p_events: batch.events.map((event) => ({ ...event,
+        _sherryDeletionOperation: metadata.deletionOperations?.get(event.conversationId) || "initial" }))
     })
   });
 }
@@ -751,7 +805,7 @@ export async function handleRequest(request, env, dependencies = {}) {
   }
 
   if (request.method === "GET" && url.pathname === "/health") {
-    return jsonResponse({ ok: true, service: "shared-memory-ingestion", configured: configured(env) }, 200, cors);
+    return jsonResponse({ ok: true, service: "shared-memory-ingestion", configured: configured(env), captureEvidenceVersion: 1, sourceMetadataVersion: 1, conversationUpdatesVersion: 1 }, 200, cors);
   }
 
   const conversationMatch = url.pathname.match(/^\/v1\/conversations\/([0-9a-f-]+)$/i);
@@ -769,6 +823,7 @@ export async function handleRequest(request, env, dependencies = {}) {
   const isRetrievalTestRoute = url.pathname === "/v1/retrieval/test";
   const isDiagnosticsRoute = url.pathname === "/v1/diagnostics/status";
   const isDashboardRoute = url.pathname === "/v1/dashboard";
+  const isAccountDeleteRoute = url.pathname === "/v1/account";
   const isPersonalMemoryRoute = url.pathname === "/v1/personal-memory";
   const isMemoryRoute = url.pathname === "/v1/conversations"
     || Boolean(conversationMatch)
@@ -785,7 +840,7 @@ export async function handleRequest(request, env, dependencies = {}) {
     || isRetrievalTestRoute
     || isDiagnosticsRoute
     || isDashboardRoute;
-  const isWorkspaceRoute = isMemoryRoute || isPersonalMemoryRoute || Boolean(personalMemoryMatch);
+  const isWorkspaceRoute = isMemoryRoute || isPersonalMemoryRoute || Boolean(personalMemoryMatch) || isAccountDeleteRoute;
 
   if (isWorkspaceRoute) {
     if (!configured(env)) return apiError("service_not_configured", "The memory service is not configured.", 503, requestId, cors);
@@ -799,8 +854,21 @@ export async function handleRequest(request, env, dependencies = {}) {
     const workspaceId = url.searchParams.get("workspaceId");
     if (!workspaceId) return apiError("workspace_required", "workspaceId is required.", 400, requestId, cors);
     try {
-      if (!await ownedWorkspace(user.id, workspaceId, env, fetchImpl)) {
+      const ownsWorkspace = await ownedWorkspace(user.id, workspaceId, env, fetchImpl);
+      if (!ownsWorkspace && !(request.method === "DELETE" && isAccountDeleteRoute && await existingAccountDeletion(user.id, workspaceId, env, fetchImpl))) {
         return apiError("workspace_forbidden", "This account cannot access the selected workspace.", 403, requestId, cors);
+      }
+      if (request.method === "DELETE" && isAccountDeleteRoute) {
+        const parsed = await boundedJson(request, 4096);
+        if (parsed.error || parsed.value?.confirmation !== "DELETE MY SHERRY ACCOUNT") {
+          return apiError("confirmation_required", "Type DELETE MY SHERRY ACCOUNT to confirm.", 422, requestId, cors);
+        }
+        if (!ownsWorkspace) return jsonResponse({ ok: true, deletion: "in_progress" }, 202, cors);
+        const job = await requestAccountDeletion(user.id, workspaceId, env, fetchImpl);
+        dependencies.ctx?.waitUntil(processAccountDeletion(job, env, fetchImpl).catch((error) => {
+          console.error(JSON.stringify({ level: "error", event: "account_deletion_cleanup_pending", jobId: job.id, message: error?.message || "Unknown error" }));
+        }));
+        return jsonResponse({ ok: true, deletion: "in_progress" }, 202, cors);
       }
       if (request.method === "GET" && isSummariesRoute) {
         return jsonResponse({ summaries: await listSummaries(workspaceId, env, fetchImpl) }, 200, cors);
@@ -879,7 +947,7 @@ export async function handleRequest(request, env, dependencies = {}) {
         const query = typeof parsed.value.query === "string" ? parsed.value.query.trim() : "";
         if (!query || query.length > 500) return apiError("invalid_query", "Enter a query between 1 and 500 characters.", 422, requestId, cors);
         await ensureRetrievalPermission({ userId: user.id, workspaceId, provider: "web_test" }, env, fetchImpl);
-        return jsonResponse(await searchMemory({ userId: user.id, workspaceId, provider: "web_test", query, maxCharacters: 10000, toolName: "memory.web_test" }, env, fetchImpl), 200, cors);
+        return jsonResponse(await searchMemory({ userId: user.id, workspaceId, provider: "web_test", scopes: ["memory:read"], query, maxCharacters: 10000, toolName: "memory.web_test" }, env, fetchImpl), 200, cors);
       }
       if (request.method === "GET" && url.pathname === "/v1/conversations") {
         return jsonResponse({ conversations: await listConversations(workspaceId, env, fetchImpl) }, 200, cors);
@@ -1018,17 +1086,27 @@ export async function handleRequest(request, env, dependencies = {}) {
     return apiError("idempotency_mismatch", "Idempotency-Key must match batchId.", 409, requestId, cors);
   }
 
-  let filtered;
+  // Check the owner before creating an archive, including when a later database reply is lost.
   try {
-    filtered = await omitDeletedConversations(validation.value, env, fetchImpl);
+    if (!(await ownedWorkspace(user.id, validation.value.workspaceId, env, fetchImpl))) {
+      return apiError("workspace_forbidden", "This account cannot write to the selected workspace.", 403, requestId, cors);
+    }
+  } catch {
+    return apiError("workspace_unavailable", "Workspace access could not be checked. Retry this upload.", 503, requestId, cors);
+  }
+
+  let deletionState;
+  try {
+    deletionState = await captureDeletionState(validation.value, env, fetchImpl);
   } catch {
     return apiError("deletion_policy_unavailable", "Deleted-conversation rules could not be checked.", 503, requestId, cors);
   }
-  if (filtered.events.length === 0) {
-    return jsonResponse({ ok: true, requestId, batchId: filtered.batchId, ignoredDeletedEvents: filtered.omitted }, 200, cors);
+  if (deletionState.pending) {
+    return apiError("conversation_cleanup_pending", "Chat deletion is still finishing. Retry this upload after cleanup completes.", 503, requestId, cors);
   }
+  const filtered = { ...validation.value, omitted: 0 };
   const redacted = redactCaptureBatch(filtered);
-  const objectKey = rawObjectKey(redacted.batch);
+  const objectKey = rawObjectKey(redacted.batch, deletionState.archiveGeneration);
   const archive = {
     ...redacted.batch,
     ingestion: {
@@ -1086,10 +1164,11 @@ export async function handleRequest(request, env, dependencies = {}) {
       rawObjectKey: objectKey,
       payloadSha256,
       payloadBytes: new TextEncoder().encode(archiveBody).byteLength,
-      redactionSummary: redacted.summary
+      redactionSummary: redacted.summary,
+      deletionOperations: deletionState.operations
     }, env, fetchImpl);
   } catch (error) {
-    if (archiveCreated) await env.RAW_MEMORY.delete(objectKey).catch(() => undefined);
+    // A lost reply can follow a committed transaction. Keep the immutable archive for replay.
     console.error(JSON.stringify({
       level: "error",
       event: "supabase_write_failed",
@@ -1100,7 +1179,10 @@ export async function handleRequest(request, env, dependencies = {}) {
   }
 
   if (!metadataResponse.ok) {
-    if (archiveCreated) await env.RAW_MEMORY.delete(objectKey).catch(() => undefined);
+    // An explicit client rejection is final; a service/gateway failure is uncertain.
+    if (archiveCreated && [400, 401, 403, 404, 409, 422].includes(metadataResponse.status)) {
+      await env.RAW_MEMORY.delete(objectKey).catch(() => undefined);
+    }
     const denied = metadataResponse.status === 401 || metadataResponse.status === 403;
     return apiError(
       denied ? "workspace_forbidden" : "metadata_rejected",
@@ -1111,7 +1193,11 @@ export async function handleRequest(request, env, dependencies = {}) {
     );
   }
 
-  const result = await metadataResponse.json();
+  let result;
+  try { result = await metadataResponse.json(); }
+  catch {
+    return apiError("metadata_unconfirmed", "The database reply could not be read. Retry this unchanged batch.", 503, requestId, cors);
+  }
   try {
     await supabaseJson(
       `ingestion_batches?workspace_id=eq.${encodeURIComponent(redacted.batch.workspaceId)}&batch_id=eq.${encodeURIComponent(redacted.batch.batchId)}`,
@@ -1119,7 +1205,7 @@ export async function handleRequest(request, env, dependencies = {}) {
       {
         method: "PATCH",
         headers: { "content-type": "application/json", prefer: "return=minimal" },
-        body: JSON.stringify({ provider_conversation_ids: [...new Set(redacted.batch.events.map((event) => event.conversationId))] })
+        body: JSON.stringify({ provider_conversation_ids: [...new Set([...redacted.batch.events, ...(redacted.batch.conversationUpdates || [])].map((event) => event.conversationId))] })
       }
     );
   } catch {
@@ -1137,8 +1223,8 @@ export async function handleRequest(request, env, dependencies = {}) {
 }
 
 export const appHandler = {
-  fetch(request, env) {
-    return handleRequest(request, env);
+  fetch(request, env, ctx) {
+    return handleRequest(request, env, { ctx });
   },
   scheduled(controller, env, ctx) {
     ctx.waitUntil(
@@ -1159,6 +1245,11 @@ export const appHandler = {
           cron: controller.cron,
           message: error?.message || "Unknown error"
         }));
+      })
+    );
+    ctx.waitUntil(
+      reconcileAccountDeletions(env).catch((error) => {
+        console.error(JSON.stringify({ level: "error", event: "account_deletion_cycle_failed", cron: controller.cron, message: error?.message || "Unknown error" }));
       })
     );
   }

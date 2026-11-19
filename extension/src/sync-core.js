@@ -48,6 +48,17 @@ export function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
 }
 
+export function selectConversationCaptures(events, provider, conversationId) {
+  if (!["chatgpt", "claude", "gemini"].includes(provider)
+    || typeof conversationId !== "string"
+    || !conversationId.trim()
+    || conversationId.length > 512) {
+    throw new Error("Open a supported conversation before repairing its upload.");
+  }
+  return (Array.isArray(events) ? events : []).filter((event) =>
+    event?.provider === provider && event.conversationId === conversationId);
+}
+
 export function createCaptureBatches(events, config, reason, options = {}) {
   if (!Array.isArray(events) || !events.length) return [];
   if (!isUuid(config.workspaceId)) throw new Error("A valid workspace ID is required.");
@@ -58,7 +69,11 @@ export function createCaptureBatches(events, config, reason, options = {}) {
   for (const event of events) {
     const provider = event.provider || "chatgpt";
     const providerEvents = groups.get(provider) || [];
-    providerEvents.push(sanitizeCaptureEvent(event, providerEvents.length));
+    const sanitized = sanitizeCaptureEvent(event, providerEvents.length);
+    // Capability applies only when constructing new immutable payloads.
+    // Local source evidence and already frozen requests are never rewritten.
+    if (options.capabilities?.sourceMetadataVersion !== 1) delete sanitized.sourceMetadata;
+    providerEvents.push(sanitized);
     groups.set(provider, providerEvents);
   }
 
@@ -107,6 +122,38 @@ export function createCaptureBatches(events, config, reason, options = {}) {
     flush();
   }
   return batches;
+}
+
+export function createConversationMetadataBatches(observations, config, options = {}) {
+  if (options.capabilities?.sourceMetadataVersion !== 1 || options.capabilities?.conversationUpdatesVersion !== 1) return [];
+  const groups = new Map();
+  for (const observation of observations) {
+    const group = groups.get(observation.provider) || [];
+    group.push(observation);
+    groups.set(observation.provider, group);
+  }
+  const batches = [];
+  for (const [provider, group] of groups) {
+    for (let index = 0; index < group.length; index += 100) {
+      // Reuse the schema-v2 envelope; the placeholder never enters the payload.
+      const envelope = createCaptureBatches([{ provider }], config, "periodic_scan", options)[0];
+      envelope.events = [];
+      envelope.conversationUpdates = group.slice(index, index + 100).map(({ conversationId, chatTitle, capturedAt, sourceMetadata }) => ({
+        conversationId, chatTitle, capturedAt, sourceMetadata: { ...sourceMetadata }
+      }));
+      batches.push(envelope);
+    }
+  }
+  return batches;
+}
+
+export function createConversationRepairBatches(events, config, provider, conversationId, options = {}) {
+  return createCaptureBatches(
+    selectConversationCaptures(events, provider, conversationId),
+    config,
+    "repair_backfill",
+    options
+  );
 }
 
 export function retryDelayMs(attemptCount) {

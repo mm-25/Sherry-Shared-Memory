@@ -91,7 +91,7 @@
   }
 
   function isProvisionalConversationId(value) {
-    return /^(?:pending:|web:)/i.test(normalizeText(value));
+    return /^(?:pending:|web:|local-(?:chatgpt|claude|gemini):)/i.test(normalizeText(value));
   }
 
   function isTransientAssistantStatus(role, text) {
@@ -123,6 +123,25 @@
     return `evt_${fnv1a(stableIdentity)}`;
   }
 
+  function browserTitle(provider, value) {
+    const brand = { chatgpt: "ChatGPT", claude: "Claude", gemini: "Gemini" }[provider] || provider;
+    const title = normalizeText(value).replace(new RegExp(`\\s*[|—-]\\s*${brand}\\s*$`, "i"), "").trim();
+    const generic = !title || /^(?:chatgpt|claude|gemini|google gemini|new chat|new conversation|untitled|(?:chatgpt|claude|gemini) conversation)$/i.test(title);
+    return { title: title || `${brand} conversation`, titleBasis: generic ? "generic" : "source" };
+  }
+
+  function browserSourceMetadata(input) {
+    return {
+      version: 1,
+      titleBasis: input.titleBasis || "unknown",
+      conversationIdentity: input.canonicalConversationId ? "provider" : "local",
+      messageIdentity: input.messageIdentity || (input.providerMessageId ? "provider" : "local"),
+      timestampBasis: input.messageTimestamp ? "source" : "observed",
+      linksStatus: "inspected",
+      attachmentsStatus: input.captureAttachments ? "inspected" : "not_inspected"
+    };
+  }
+
   function createCapturedEvent(input) {
     const product = normalizeText(input.product || input.provider) || "chatgpt";
     const definition = providerDefinition(product) || PROVIDERS.chatgpt;
@@ -149,7 +168,8 @@
       messageTimestamp: input.messageTimestamp || null,
       capturedAt: input.capturedAt || new Date().toISOString(),
       links: Array.isArray(input.links) ? [...new Set(input.links.filter(Boolean))] : [],
-      attachments: Array.isArray(input.attachments) ? input.attachments : []
+      attachments: Array.isArray(input.attachments) ? input.attachments : [],
+      ...(input.sourceMetadata ? { sourceMetadata: { ...input.sourceMetadata } } : {})
     };
   }
 
@@ -297,26 +317,11 @@
     });
   }
 
-  function filterExactFallbackDuplicates(storedEvents, incomingEvents) {
-    let duplicates = 0;
-    const events = incomingEvents.filter((incoming) => {
-      if (incoming.providerMessageId || normalizeText(incoming.text).length < 60) return true;
-      const repeated = storedEvents.some((stored) => (
-        !stored.providerMessageId
-        && stored.eventId !== incoming.eventId
-        && stored.provider === incoming.provider
-        && stored.conversationId === incoming.conversationId
-        && stored.role === incoming.role
-        && normalizeText(stored.text) === normalizeText(incoming.text)
-      ));
-      if (repeated) duplicates += 1;
-      return !repeated;
-    });
-    return { events, duplicates };
-  }
 
   globalThis.SharedMemoryCaptureCore = Object.freeze({
     PROVIDERS,
+    browserTitle,
+    browserSourceMetadata,
     createCapturedEvent,
     createEventId,
     fnv1a,
@@ -333,7 +338,6 @@
     reconcileProvisionalAliases,
     reconcileFallbackEventIdentities,
     disambiguateFallbackCollisions,
-    filterExactFallbackDuplicates,
     rekeyCapturedEvents
   });
 })();

@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { chromiumManifest } from "../scripts/build-chromium.mjs";
 
 const manifest = JSON.parse(
@@ -8,33 +10,32 @@ const manifest = JSON.parse(
 );
 const bridgeSource = await readFile(new URL("../src/sherry-bridge.js", import.meta.url), "utf8");
 const backgroundSource = await readFile(new URL("../src/background.js", import.meta.url), "utf8");
+const recoverySource = await readFile(new URL("../src/tab-recovery.js", import.meta.url), "utf8");
 
-test("keeps the Firefox-specific background script and Chrome service worker in source", () => {
+test("the installed unpacked Brave manifest has only a Chromium service worker", () => {
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.background.service_worker, "src/background.js");
-  assert.deepEqual(manifest.background.scripts, ["src/background.js"]);
-  assert.equal(manifest.background.type, "module");
-  assert.equal(
-    manifest.browser_specific_settings.gecko.id,
-    "shared-memory-capture@memory.local"
-  );
-  assert.equal(manifest.browser_specific_settings.gecko.strict_min_version, "140.0");
-  assert.equal(manifest.browser_specific_settings.gecko_android.strict_min_version, "142.0");
-  assert.deepEqual(
-    manifest.browser_specific_settings.gecko.data_collection_permissions,
-    {
-      required: [
-        "personallyIdentifyingInfo",
-        "healthInfo",
-        "financialAndPaymentInfo",
-        "authenticationInfo",
-        "personalCommunications",
-        "browsingActivity",
-        "websiteContent"
-      ],
-      optional: ["technicalAndInteraction"]
-    }
-  );
+  assert.deepEqual(manifest.background, {
+    service_worker: "src/background.js",
+    type: "module"
+  });
+  assert.equal("browser_specific_settings" in manifest, false);
+});
+
+test("the Firefox package retains its own compatible background and identity", () => {
+  const script = fileURLToPath(new URL("../scripts/build-firefox.sh", import.meta.url));
+  const archive = execFileSync("bash", [script], { encoding: "utf8" }).trim().split("\n").at(-1);
+  const firefox = JSON.parse(execFileSync("unzip", ["-p", archive, "manifest.json"], { encoding: "utf8" }));
+  assert.deepEqual(firefox.background, { scripts: ["src/background.js"], type: "module" });
+  assert.equal(firefox.browser_specific_settings.gecko.id, "shared-memory-capture@memory.local");
+  assert.equal(firefox.browser_specific_settings.gecko.strict_min_version, "140.0");
+  assert.equal(firefox.browser_specific_settings.gecko_android.strict_min_version, "142.0");
+  assert.deepEqual(firefox.browser_specific_settings.gecko.data_collection_permissions, {
+    required: ["personallyIdentifyingInfo", "healthInfo", "financialAndPaymentInfo", "authenticationInfo", "personalCommunications", "browsingActivity", "websiteContent"],
+    optional: ["technicalAndInteraction"]
+  });
+  assert.equal(firefox.version, manifest.version);
+  assert.deepEqual(firefox.host_permissions, manifest.host_permissions);
+  assert.deepEqual(firefox.content_scripts, manifest.content_scripts);
 });
 
 test("builds a Chromium Manifest V3 with only a service worker", () => {
@@ -61,8 +62,9 @@ test("installs the Firefox-compatible Sherry app bridge only on the production a
 });
 
 test("runtime injection uses extension-root paths instead of the popup's src directory", () => {
-  assert.match(backgroundSource, /files: \["\/src\/sherry-bridge\.js"\]/);
-  assert.doesNotMatch(backgroundSource, /files: \["src\/sherry-bridge\.js"\]/);
+  assert.match(backgroundSource, /restoreOpenTabs\(extensionApi\)/);
+  assert.match(recoverySource, /"\/src\/sherry-bridge\.js"/);
+  assert.doesNotMatch(recoverySource, /"src\/sherry-bridge\.js"/);
 });
 
 test("bridges Firefox page controls through a DOM mailbox with event and message fallbacks", () => {

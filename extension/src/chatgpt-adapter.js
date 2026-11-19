@@ -23,16 +23,19 @@
 
   const state = {
     settings: { ...DEFAULT_SETTINGS },
+    settingsLoaded: false,
     currentUrl: location.href,
     observer: null,
     pendingTurns: new Set(),
     settleTimer: null,
     capturedById: new Map(),
+      metadataByConversation: new Map(),
     lastScanAt: null,
     lastScanCandidates: null,
     lastScanEmitted: null,
     lastScanStored: null,
     lastError: null,
+    provisionalId: `pending:chatgpt:${Date.now()}:${Math.random().toString(36).slice(2)}`,
     conversationId: null
   };
 
@@ -41,9 +44,17 @@
   }
 
   function sendMessage(message) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ ok: false, error: "Capture confirmation timed out. Sherry will retry." }), 10000);
+      Promise.resolve().then(() => sendMessageAttempt(message)).then(resolve, (error) => resolve({ ok: false, error: error.message }))
+        .finally(() => clearTimeout(timer));
+    });
+  }
+
+  function sendMessageAttempt(message) {
     if (globalThis.browser) {
       return extensionApi.runtime.sendMessage(message)
-        .then((response) => response ?? { ok: true })
+        .then((response) => response ?? { ok: false, error: "The background service did not confirm this capture. It will be retried." })
         .catch((error) => ({ ok: false, error: error.message }));
     }
     return new Promise((resolve) => {
@@ -52,7 +63,7 @@
           resolve({ ok: false, error: extensionApi.runtime.lastError.message });
           return;
         }
-        resolve(response ?? { ok: true });
+        resolve(response ?? { ok: false, error: "The background service did not confirm this capture. It will be retried." });
       });
     });
   }
@@ -88,12 +99,13 @@
 
   function getConversationMeta() {
     const canonicalConversationId = core.parseConversationIdFromUrl(location.href);
-    const conversationId = canonicalConversationId
-      || core.parseConversationId(location.href, getConversationRegionLabel());
+    // A provider-generated local label can precede its real chat URL. Keep the
+    // first turn provisional until that URL arrives instead of uploading a split chat.
+    const conversationId = canonicalConversationId;
     return {
-      conversationId: conversationId || `pending:${core.fnv1a(`${location.origin}${location.pathname}|${document.title}`)}`,
+      ...core.browserTitle("chatgpt", document.title),
+      conversationId: conversationId || state.provisionalId,
       canonicalConversationId,
-      title: document.title.replace(/\s*[|—-]\s*ChatGPT\s*$/i, "").trim() || "ChatGPT conversation",
       url: location.href,
       temporary: core.isLikelyTemporaryChat(location.href, getTemporaryChatSignal())
     };
@@ -205,9 +217,12 @@
     if (!text || role === "unknown" || core.isTransientAssistantStatus(role, text)) return null;
 
     const time = turn.querySelector("time[datetime]")?.getAttribute("datetime") ?? null;
+    const providerMessageId = getProviderMessageId(turn);
+    const idNode = turn.matches("[data-message-id]") ? turn : turn.querySelector("[data-message-id]");
     return core.createCapturedEvent({
+      sourceMetadata: core.browserSourceMetadata({ ...meta, providerMessageId, messageIdentity: idNode?.getAttribute("data-message-id") ? "provider" : "local", messageTimestamp: time, captureAttachments: state.settings.captureAttachments }),
       conversationId: meta.conversationId,
-      providerMessageId: getProviderMessageId(turn),
+      providerMessageId,
       sequence,
       role,
       text,
@@ -220,11 +235,19 @@
     });
   }
 
-  async function captureTurns(turns, reason) {
+  let scanChain = Promise.resolve();
+  function captureTurns(turns, reason) {
+    const scan = scanChain.catch(() => undefined).then(() => captureTurnsNow(turns, reason));
+    scanChain = scan;
+    return scan;
+  }
+
+  async function captureTurnsNow(turns, reason) {
+    if (!state.settingsLoaded) await loadSettings();
     const startedAt = performance.now();
     const meta = getConversationMeta();
     const previousConversationId = state.conversationId;
-    state.conversationId = meta.conversationId;
+    // Keep the old identity until reconciliation succeeds, so it can be retried.
 
     if (!state.settings.captureEnabled) {
       await emitDiagnostic("capture", "skipped", { reason: "disabled" });
@@ -262,12 +285,15 @@
           toConversationId: meta.conversationId,
           message: state.lastError
         });
+        return { ok: false, error: state.lastError };
       }
     }
 
+    state.conversationId = meta.conversationId;
     const allTurns = findInitialTurns();
     const sequenceByTurn = new Map(allTurns.map((turn, index) => [turn, index]));
     const events = uniqueTopLevelTurns(turns).flatMap(expandTurn)
+      .filter((turn) => sequenceByTurn.has(turn))
       .map((turn) => extractEvent(turn, sequenceByTurn.get(turn) ?? allTurns.indexOf(turn), meta))
       .filter(Boolean)
       .filter((event) => state.capturedById.get(event.eventId) !== event.contentHash);
@@ -275,14 +301,28 @@
     let captureError = null;
     let storedChanges = 0;
     if (events.length) {
-      const response = await sendMessage({ type: "CAPTURE_BATCH", payload: { events, reason } });
+      const response = await sendMessage({ type: "CAPTURE_BATCH", payload: { events, reason, temporaryChat: meta.temporary } });
       if (response?.ok) {
         events.forEach((event) => state.capturedById.set(event.eventId, event.contentHash));
         storedChanges = Number(response.result?.added || 0) + Number(response.result?.updated || 0);
+        state.lastError = null;
       } else {
         state.lastError = response?.error || "Capture upload failed";
         captureError = state.lastError;
       }
+    }
+
+    // Title observations have their own acknowledgment and never enter message deduplication.
+    const metadataKey = JSON.stringify([meta.conversationId, meta.title, meta.titleBasis, Boolean(meta.canonicalConversationId)]);
+    if (!captureError && state.capturedById.size && !core.isProvisionalConversationId(meta.conversationId)
+        && state.metadataByConversation.get(meta.conversationId) !== metadataKey) {
+      const response = await sendMessage({ type: "CONVERSATION_METADATA", payload: {
+        provider: "chatgpt", conversationId: meta.conversationId, chatTitle: meta.title, capturedAt: now(),
+        sourceMetadata: { version: 1, titleBasis: meta.titleBasis, conversationIdentity: meta.canonicalConversationId ? "provider" : "local", messageIdentity: "unknown", timestampBasis: "unknown", linksStatus: "unknown", attachmentsStatus: "unknown" }
+      } });
+      if (response?.ok) {
+        if (response.result?.retained !== false) state.metadataByConversation.set(meta.conversationId, metadataKey);
+      } else { captureError = response?.error || "Title observation could not be saved. Sherry will retry."; state.lastError = captureError; }
     }
 
     state.lastScanAt = now();
@@ -307,7 +347,7 @@
     state.settleTimer = setTimeout(async () => {
       const turns = [...state.pendingTurns];
       state.pendingTurns.clear();
-      if (turns.length) await captureTurns(turns, reason);
+      if (turns.length) await captureTurns(turns, reason).catch((error) => { state.lastError = error.message; });
     }, 900);
   }
 
@@ -315,7 +355,7 @@
     state.observer?.disconnect();
     state.observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
-        if (mutation.type === "characterData") addCandidateTurns(mutation.target);
+        addCandidateTurns(mutation.target);
         mutation.addedNodes.forEach(addCandidateTurns);
       }
       if (state.pendingTurns.size) schedulePendingCapture();
@@ -331,16 +371,16 @@
   async function loadSettings() {
     const stored = await extensionApi.storage.sync.get(DEFAULT_SETTINGS);
     state.settings = { ...DEFAULT_SETTINGS, ...stored };
+    state.settingsLoaded = true;
   }
 
   async function initialCapture() {
     const turns = findInitialTurns();
-    turns.forEach((turn) => state.pendingTurns.add(turn));
-    await emitDiagnostic("page_detected", "ok", {
+        await emitDiagnostic("page_detected", "ok", {
       conversationId: getConversationMeta().conversationId,
       initialCandidates: turns.length
     });
-    if (turns.length) await captureTurns(turns, "initial_scan");
+    return captureTurns(turns, "initial_scan");
   }
 
   extensionApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -365,26 +405,47 @@
       return true;
     }
 
-    if (message?.type === "SETTINGS_CHANGED") {
-      loadSettings().then(() => sendResponse({ ok: true }));
+    if (message?.type === "SETTINGS_CHANGED" || message?.type === "RESUME_CAPTURE") {
+      resumeCapture().then((result) => sendResponse(result || { ok: true }));
       return true;
     }
 
     return false;
   });
 
-  async function start() {
-    await loadSettings();
-    observeConversation();
-    await initialCapture();
+  async function resumeCapture() {
+    try {
+      await loadSettings();
+      observeConversation();
+      return await initialCapture();
+    } catch (error) {
+      state.lastError = error.message;
+      return { ok: false, error: state.lastError };
+    }
+  }
 
-    setInterval(async () => {
+  async function start() {
+    setInterval(() => {
       if (location.href === state.currentUrl) return;
+      // A new chat in the same tab gets a separate provisional identity.
+      if (!core.parseConversationIdFromUrl(location.href, "chatgpt")) {
+        state.provisionalId = `pending:chatgpt:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+        state.conversationId = null;
+      }
       state.currentUrl = location.href;
       state.capturedById.clear();
-      await emitDiagnostic("navigation", "ok", { url: location.href });
-      setTimeout(initialCapture, 500);
+      void resumeCapture();
     }, 1000);
+    setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      if (!state.settingsLoaded || !state.observer) { void resumeCapture(); return; }
+      void captureTurns(findInitialTurns(), "periodic_scan").catch((error) => { state.lastError = error.message; });
+    }, 5000);
+    document.addEventListener?.("visibilitychange", () => {
+      if (document.visibilityState !== "hidden") void resumeCapture();
+    });
+    globalThis.addEventListener?.("pageshow", () => { void resumeCapture(); });
+    await resumeCapture();
   }
 
   start().catch(async (error) => {

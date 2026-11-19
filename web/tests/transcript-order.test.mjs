@@ -47,3 +47,13 @@ test("loads transcript order before the app and removes the old explanatory line
   assert.match(html, /<select id="transcriptSort"><option value="latest">Latest first<\/option><option value="oldest">Oldest first<\/option><\/select>/);
   assert.doesNotMatch(html, /id="transcriptOrder"/);
 });
+
+test('mobile backfill order is independent of observation time and dates remain explicitly unknown', () => {
+  const events = [
+    { id: 'later', sequence: 500000, captured_at: '2026-10-02T06:00:00Z', source_locator: 'android-session:test' },
+    { id: 'earlier', sequence: 499999, captured_at: '2026-10-02T06:05:00Z', source_locator: 'android-session:test' }
+  ];
+  assert.deepEqual(Array.from(sort(events, 'oldest'), e => e.id), ['earlier', 'later']);
+  assert.equal(context.SherryTranscriptOrder.observationLabel(events[0]), 'Original date unknown · observed');
+  assert.equal(context.SherryTranscriptOrder.observationLabel({message_timestamp: '2020-01-01T00:00:00Z'}), 'Sent');
+});

@@ -44,3 +44,16 @@ test("keeps the previous one-message-per-turn layout working", () => {
   const turn = { matches: () => false };
   assert.deepEqual(Array.from(expandTurn(turn)), [turn]);
 });
+
+test("a ChatGPT local conversation label is never accepted as a permanent cloud identity", async () => {
+  const core = await readFile(new URL("../src/core.js",import.meta.url),"utf8");
+  const begin=source.indexOf("function getConversationRegionLabel()");
+  const end=source.indexOf("function closestTurn(node)",begin);
+  const page={URL,location:{href:"https://chatgpt.com/"},document:{title:"Invented chat",
+    querySelector:(selector)=>selector==="[aria-label^='Conversation ']"?{getAttribute:()=>"Conversation local-chatgpt:invented-local-id"}:null}};
+  const scope=vm.createContext(page);vm.runInContext(core,scope);
+  vm.runInContext(`const core=SharedMemoryCaptureCore;const state={provisionalId:"pending:chatgpt:tab-test"};${source.slice(begin,end)};globalThis.meta=getConversationMeta;`,scope);
+  assert.equal(scope.meta().conversationId,"pending:chatgpt:tab-test");
+  page.location.href="https://chatgpt.com/c/permanent-chat-id";
+  assert.equal(scope.meta().conversationId,"permanent-chat-id");
+});

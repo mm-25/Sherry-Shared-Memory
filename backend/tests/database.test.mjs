@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { BATCH_ID, USER_ID, WORKSPACE_ID, validBatch, validBatchV2 } from "./fixtures.mjs";
@@ -7,6 +7,7 @@ import { BATCH_ID, USER_ID, WORKSPACE_ID, validBatch, validBatchV2 } from "./fix
 const migrationUrls = [
   new URL("../supabase/migrations/20260914141327_gate_5_ingestion_pipeline.sql", import.meta.url),
   new URL("../supabase/migrations/20260915043914_conversation_deletion.sql", import.meta.url),
+  new URL("../supabase/migrations/20260915050833_fix_event_deduplication.sql", import.meta.url),
   new URL("../supabase/migrations/20260915131614_gate_6_memory_pipeline.sql", import.meta.url),
   new URL("../supabase/migrations/20260915131908_gate_6_security_followup.sql", import.meta.url),
   new URL("../supabase/migrations/20260915132043_gate_6_checkpoint_lineage.sql", import.meta.url),
@@ -26,10 +27,29 @@ const migrationUrls = [
   new URL("../supabase/migrations/20260925184637_prune_false_conflicts_and_expand_review_queue.sql", import.meta.url),
   new URL("../supabase/migrations/20260925190417_prevent_superseded_claim_reactivation.sql", import.meta.url),
   new URL("../supabase/migrations/20260925234836_cross_chat_conflicts_and_time_based_summaries.sql", import.meta.url),
-  new URL("../supabase/migrations/20260929120000_gate_9_delete_derived_claims.sql", import.meta.url)
+  new URL("../supabase/migrations/20260929120000_gate_9_delete_derived_claims.sql", import.meta.url),
+  new URL("../supabase/migrations/20260930184000_gate_9_archive_conversation_index.sql", import.meta.url),
+  new URL("../supabase/migrations/20261001044500_gate_9_restrict_recapture_trigger.sql", import.meta.url),
+  new URL("../supabase/migrations/20261001093000_gate_9_account_deletion_jobs.sql", import.meta.url),
+  new URL("../supabase/migrations/20261022000045_v1_allow_chat_recapture_after_cleanup.sql", import.meta.url),
+  new URL("../supabase/migrations/20261022052449_bounded_chat_archive_cleanup.sql", import.meta.url)
 ];
 
-async function migratedDatabase(includeGate9 = true) {
+// Legacy claim-lifecycle fixtures intentionally retain their historical schema.
+// Current ingestion regressions below use every migration in chronological order.
+async function migratedDatabase() {
+  const names = (await readdir(new URL("../supabase/migrations/", import.meta.url))).filter((name) => name.endsWith(".sql")).sort();
+  return historicalClaimsDatabase(true, names.map((name) => new URL(`../supabase/migrations/${name}`, import.meta.url)));
+}
+
+const mobileForwardMigration = new URL("../supabase/migrations/20261025211409_android_observation_evidence.sql", import.meta.url);
+async function deployedBaselineWithoutMobile() {
+  const names = (await readdir(new URL("../supabase/migrations/", import.meta.url)))
+    .filter((name) => name.endsWith(".sql") && name !== "20261002062250_mobile_capture_evidence.sql"
+      && name < "20261025211409_android_observation_evidence.sql").sort();
+  return historicalClaimsDatabase(true, names.map((name) => new URL(`../supabase/migrations/${name}`, import.meta.url)));
+}
+async function historicalClaimsDatabase(includeGate9 = true, selectedMigrations = migrationUrls) {
   const db = new PGlite();
   await db.exec(`
     create schema auth;
@@ -42,7 +62,8 @@ async function migratedDatabase(includeGate9 = true) {
       select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
     $$;
   `);
-  for (const migrationUrl of includeGate9 ? migrationUrls : migrationUrls.slice(0, -1)) {
+  const beforeGate9 = migrationUrls.findIndex((url) => url.pathname.endsWith("20260929120000_gate_9_delete_derived_claims.sql"));
+  for (const migrationUrl of includeGate9 ? selectedMigrations : migrationUrls.slice(0, beforeGate9)) {
     const migration = (await readFile(migrationUrl, "utf8"))
       // PGlite does not bundle pgcrypto; modern Postgres still provides gen_random_uuid().
       // The unmodified migration keeps the extension declaration required by Supabase.
@@ -52,8 +73,78 @@ async function migratedDatabase(includeGate9 = true) {
   return db;
 }
 
+test("a completed chat deletion permits a fresh capture of the same source", async () => {
+  const db = await historicalClaimsDatabase();
+  try {
+    await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
+    await db.query("insert into public.workspaces (id, owner_user_id) values ($1, $2)", [WORKSPACE_ID, USER_ID]);
+    const batch = validBatch();
+    await db.query(`insert into public.deleted_conversations
+      (workspace_id,provider,provider_conversation_id,archive_reconciled_at)
+      values ($1,'chatgpt',$2,now())`, [WORKSPACE_ID, batch.events[0].conversationId]);
+    await db.exec("set role service_role");
+    const receipt = await callIngestion(db, batch, `${WORKSPACE_ID}/chatgpt/2026/10/21/${batch.batchId}.json`);
+    assert.equal(receipt.inserted, 1);
+  } finally {
+    await db.close();
+  }
+});
+
+test("a deletion boundary rejects stale capture work and permits its new operation", async () => {
+  const db = await historicalClaimsDatabase();
+  try {
+    await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
+    await db.query("insert into public.workspaces (id, owner_user_id) values ($1, $2)", [WORKSPACE_ID, USER_ID]);
+    const batch = validBatch();
+    const deleted = await db.query(`insert into public.deleted_conversations
+      (workspace_id,provider,provider_conversation_id,archive_reconciled_at)
+      values ($1,'chatgpt',$2,now()) returning operation_id`, [WORKSPACE_ID,batch.events[0].conversationId]);
+    batch.events[0]._sherryDeletionOperation = 'initial';
+    await db.exec("set role service_role");
+    await assert.rejects(() => callIngestion(db,batch,`${WORKSPACE_ID}/chatgpt/test/${batch.batchId}.json`), /capture_deletion_boundary_changed/);
+    batch.events[0]._sherryDeletionOperation = deleted.rows[0].operation_id;
+    assert.equal((await callIngestion(db,batch,`${WORKSPACE_ID}/chatgpt/test/${batch.batchId}.json`)).inserted,1);
+    await db.exec("reset role");
+    await db.query("delete from public.conversations where workspace_id = $1",[WORKSPACE_ID]);
+    const next = await db.query(`update public.deleted_conversations set operation_id=gen_random_uuid(),
+      archive_reconciled_at=null,archive_cleanup_keys=null where workspace_id=$1 returning operation_id`,[WORKSPACE_ID]);
+    const replay = {...batch,batchId:'90000000-0000-4000-8000-000000000019'};
+    replay.events[0]._sherryDeletionOperation=next.rows[0].operation_id;
+    await db.exec("set role service_role");
+    await assert.rejects(() => callIngestion(db,replay,`${WORKSPACE_ID}/chatgpt/test/${replay.batchId}.json`),/conversation_deletion_cleanup_pending/);
+    await db.exec("reset role");
+    await db.query("update public.deleted_conversations set archive_reconciled_at=now() where workspace_id=$1",[WORKSPACE_ID]);
+    await db.exec("set role service_role");
+    assert.equal((await callIngestion(db,replay,`${WORKSPACE_ID}/chatgpt/test/${replay.batchId}.json`)).inserted,1);
+  } finally { await db.close(); }
+});
+
+test("account deletion creates a durable job and removes only the owner's workspace", async () => {
+  const db = await historicalClaimsDatabase();
+  const otherUser = "e6ab76c8-0ea7-42ed-9d23-5e4d8bd864a8";
+  const otherWorkspace = "d971316b-dbbe-4aac-8178-64c221f62812";
+  try {
+    await db.query("insert into auth.users (id) values ($1), ($2)", [USER_ID, otherUser]);
+    await db.query("insert into public.workspaces (id, owner_user_id) values ($1, $2), ($3, $4)", [WORKSPACE_ID, USER_ID, otherWorkspace, otherUser]);
+    await assert.rejects(() => db.query("select public.request_account_deletion($1::uuid, $2::uuid)", [otherUser, WORKSPACE_ID]));
+    await db.exec("set role authenticated");
+    await assert.rejects(() => db.query("select public.request_account_deletion($1::uuid, $2::uuid)", [USER_ID, WORKSPACE_ID]));
+    await db.exec("reset role");
+    await db.query("select public.request_account_deletion($1::uuid, $2::uuid)", [USER_ID, WORKSPACE_ID]);
+    assert.equal((await db.query("select count(*)::int as total from public.workspaces where id = $1", [WORKSPACE_ID])).rows[0].total, 0);
+    assert.equal((await db.query("select count(*)::int as total from public.workspaces where id = $1", [otherWorkspace])).rows[0].total, 1);
+    assert.equal((await db.query("select count(*)::int as total from public.account_deletion_jobs where workspace_id = $1", [WORKSPACE_ID])).rows[0].total, 1);
+    await assert.rejects(
+      () => db.query("insert into public.workspaces (owner_user_id) values ($1)", [USER_ID]),
+      /account_deletion_in_progress/
+    );
+  } finally {
+    await db.close();
+  }
+});
+
 test("retirement migration preserves old claims but blocks new claims and excludes them from search", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -81,7 +172,7 @@ test("retirement migration preserves old claims but blocks new claims and exclud
 });
 
 test("sensitivity settings migration labels existing Personal Memory and creates workspace defaults", async () => {
-  const db = await migratedDatabase(false);
+  const db = await historicalClaimsDatabase(false);
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -116,7 +207,7 @@ async function seedConversation(db, slug) {
 }
 
 test("deleting a conversation removes its historical claims and conflicts", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id) values ($1, $2)", [WORKSPACE_ID, USER_ID]);
@@ -144,14 +235,14 @@ test("deleting a conversation removes its historical claims and conflicts", asyn
 });
 
 test("Gate 9 migration clears source-less legacy derived claims", async () => {
-  const db = await migratedDatabase(false);
+  const db = await historicalClaimsDatabase(false);
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id) values ($1, $2)", [WORKSPACE_ID, USER_ID]);
     await db.query(`insert into public.memory_claims
       (workspace_id, predicate, value, display_text, confidence, observed_at)
       values ($1, 'old_preference', '"private"'::jsonb, 'Orphaned derived text', 0.8, now())`, [WORKSPACE_ID]);
-    await db.exec(await readFile(migrationUrls.at(-1), "utf8"));
+    await db.exec(await readFile(new URL("../supabase/migrations/20260929120000_gate_9_delete_derived_claims.sql", import.meta.url), "utf8"));
     const claims = await db.query("select count(*)::int as total from public.memory_claims where conversation_id is null and authority = 'derived'");
     assert.equal(claims.rows[0].total, 0);
   } finally {
@@ -181,9 +272,9 @@ async function callIngestion(db, batch, rawObjectKey, sha256 = "a".repeat(64)) {
   return result.rows[0].result;
 }
 
-async function callIngestionV2(db, batch, rawObjectKey, sha256 = "c".repeat(64)) {
+async function callIngestionV2(db, batch, rawObjectKey, sha256 = "c".repeat(64), rpc = "ingest_capture_batch_v2") {
   const result = await db.query(
-    `select public.ingest_capture_batch_v2(
+    `select public.${rpc}(
       $1::uuid, $2::uuid, $3::uuid, $4::text, $5::text, $6::text,
       $7::text, $8::text, $9::text, $10::text, $11::bigint, $12::jsonb,
       $13::jsonb, $14::jsonb, $15::jsonb
@@ -209,8 +300,66 @@ async function callIngestionV2(db, batch, rawObjectKey, sha256 = "c".repeat(64))
   return result.rows[0].result;
 }
 
-test("activity rollup ignores a later positional recapture of the same message", async () => {
+test("current phone-local identity stays separate from an overlapping browser conversation", async () => {
   const db = await migratedDatabase();
+  try {
+    await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
+    await db.query("insert into public.workspaces (id, owner_user_id) values ($1, $2)", [WORKSPACE_ID, USER_ID]);
+    const browser = validBatchV2();
+    const phone = structuredClone(browser);
+    phone.batchId = "90000000-0000-4000-8000-000000000028";
+    phone.surface = "android";
+    phone.reason = "accessibility";
+    Object.assign(phone.captureClient, { type: "accessibility", os: "android", deviceId: "device:phone-test" });
+    Object.assign(phone.events[0], {
+      eventId: "evt_phone_overlap", conversationId: "android-session:separate-phone-context",
+      sourceLocator: "android-session:separate-phone-context", sourceUrl: null, providerMessageId: null,
+      chatTitle: "ChatGPT captured conversation",
+      captureEvidence: { version: 1, conversationIdentity: "local_session", messageIdentity: "local_sequence",
+        timestampBasis: "observed", orderBasis: "session_sequence", completeness: "unknown", titleBasis: "placeholder" }
+    });
+    await db.exec("set role service_role");
+    assert.equal((await callIngestionV2(db, browser, `${WORKSPACE_ID}/chatgpt/test/${browser.batchId}.json`)).inserted, 1);
+    const rpc = "ingest_capture_batch_v2_evidence";
+    assert.equal((await callIngestionV2(db, phone, `${WORKSPACE_ID}/chatgpt/test/${phone.batchId}.json`, "b".repeat(64), rpc)).inserted, 1);
+    assert.equal((await callIngestionV2(db, phone, `${WORKSPACE_ID}/chatgpt/test/${phone.batchId}.json`, "b".repeat(64), rpc)).idempotentReplay, true);
+    const rows = (await db.query("select provider_conversation_id, count(*)::int as events from public.conversation_events group by provider_conversation_id order by provider_conversation_id")).rows;
+    assert.equal((await db.query("select count(*)::int as count from public.conversations")).rows[0].count, 2);
+    assert.deepEqual(rows.map((row) => row.events), [1, 1]);
+    assert.deepEqual(rows.map((row) => row.provider_conversation_id), [phone.events[0].conversationId, browser.events[0].conversationId]);
+  } finally { await db.close(); }
+});
+
+test("cloud reconciliation can reuse a proven shared provider chat and message identity across surfaces", async () => {
+  const db = await migratedDatabase();
+  try {
+    await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
+    await db.query("insert into public.workspaces (id, owner_user_id) values ($1, $2)", [WORKSPACE_ID, USER_ID]);
+    const browser = validBatchV2();
+    // This is a cloud capability test. The current Android reader does not
+    // expose the provider IDs required to produce this future payload.
+    const continued = structuredClone(browser);
+    continued.batchId = "90000000-0000-4000-8000-000000000029";
+    continued.surface = "android";
+    continued.reason = "accessibility";
+    Object.assign(continued.captureClient, { type: "accessibility", os: "android", deviceId: "device:phone-shared-id-test" });
+    continued.events[0].eventId = "evt_same_provider_turn_from_phone";
+    continued.events.push({ ...continued.events[0], eventId: "evt_new_provider_turn_from_phone",
+      providerMessageId: "message-124", sequence: 1, role: "assistant", text: "An invented continued reply.", contentHash: "cd56ef78" });
+    await db.exec("set role service_role");
+    assert.equal((await callIngestionV2(db, browser, `${WORKSPACE_ID}/chatgpt/test/${browser.batchId}.json`)).inserted, 1);
+    const receipt = await callIngestionV2(db, continued, `${WORKSPACE_ID}/chatgpt/test/${continued.batchId}.json`, "d".repeat(64));
+    assert.equal(receipt.inserted, 1);
+    assert.equal(receipt.duplicates, 1);
+    assert.equal((await db.query("select count(*)::int as count from public.conversations")).rows[0].count, 1);
+    const turns = (await db.query("select provider_message_id, sequence, role from public.conversation_events order by sequence")).rows;
+    assert.deepEqual(turns.map((row) => row.provider_message_id), ["message-123", "message-124"]);
+    assert.deepEqual(turns.map((row) => row.role), ["user", "assistant"]);
+  } finally { await db.close(); }
+});
+
+test("activity rollup ignores a later positional recapture of the same message", async () => {
+  const db = await historicalClaimsDatabase();
   try {
     await db.exec(await readFile(new URL("../supabase/migrations/20260927125621_stable_conversation_activity.sql", import.meta.url), "utf8"));
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
@@ -234,7 +383,7 @@ test("activity rollup ignores a later positional recapture of the same message",
 });
 
 test("migration executes and ingestion atomically creates searchable events and a cursor", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -270,7 +419,7 @@ test("migration executes and ingestion atomically creates searchable events and 
 });
 
 test("archive index migration leaves legacy duplicate-only batches discoverable", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -282,6 +431,11 @@ test("archive index migration leaves legacy duplicate-only batches discoverable"
     assert.equal(receipt.duplicates, 1);
     await db.exec("reset role");
     await db.exec(await readFile(new URL("../supabase/migrations/20260930184000_gate_9_archive_conversation_index.sql", import.meta.url), "utf8"));
+    await db.exec(await readFile(new URL("../supabase/migrations/20261001044500_gate_9_restrict_recapture_trigger.sql", import.meta.url), "utf8"));
+    const permissions = await db.query(`select
+      has_function_privilege('anon', 'public.reject_recapture_of_deleted_conversation()', 'EXECUTE') as anonymous_can_call,
+      has_function_privilege('authenticated', 'public.reject_recapture_of_deleted_conversation()', 'EXECUTE') as signed_in_can_call`);
+    assert.deepEqual(permissions.rows[0], { anonymous_can_call: false, signed_in_can_call: false });
     const rows = await db.query("select batch_id, provider_conversation_ids from public.ingestion_batches order by id");
     assert.deepEqual(rows.rows.map((row) => row.provider_conversation_ids), [[first.events[0].conversationId], null]);
     await db.query("insert into public.deleted_conversations (workspace_id, provider, provider_conversation_id) values ($1, 'chatgpt', $2)", [WORKSPACE_ID, first.events[0].conversationId]);
@@ -297,7 +451,7 @@ test("archive index migration leaves legacy duplicate-only batches discoverable"
 });
 
 test("database transaction treats identical batches as replays and changed stream content as a revision", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -329,7 +483,7 @@ test("database transaction treats identical batches as replays and changed strea
 });
 
 test("one conflict choice resolves repeated statement pairs and retires superseded claims", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -394,7 +548,7 @@ test("one conflict choice resolves repeated statement pairs and retires supersed
 });
 
 test("identical displayed statements never require a choice, even with different JSON values", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -426,7 +580,7 @@ test("identical displayed statements never require a choice, even with different
 });
 
 test("summary revisions within one chat stay saved but never enter the conflict queue", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -460,7 +614,7 @@ test("summary revisions within one chat stay saved but never enter the conflict 
 });
 
 test("database rejects a valid user writing to a workspace they do not own", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     const otherUser = "5a59e218-44dc-4875-9e5e-10916c3a8ce4";
     await db.query("insert into auth.users (id) values ($1), ($2)", [USER_ID, otherUser]);
@@ -475,7 +629,7 @@ test("database rejects a valid user writing to a workspace they do not own", asy
 });
 
 test("distinct event identities survive repeated provider sequence positions", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -495,7 +649,7 @@ test("distinct event identities survive repeated provider sequence positions", a
 });
 
 test("Capture API v2 persists device, adapter, source locator, and coverage provenance", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -533,38 +687,33 @@ test("Capture API v2 persists device, adapter, source locator, and coverage prov
   }
 });
 
-test("Capture API v2 reconciles one unstable DOM identity to the deterministic fallback", async () => {
+test("Capture API v2 never replaces a different identity solely at the same position", async () => {
   const db = await migratedDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
-    await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
+    await db.query("insert into public.workspaces (id, owner_user_id) values ($1, $2)", [WORKSPACE_ID, USER_ID]);
     await db.exec("set role service_role");
-
     const first = validBatchV2();
-    first.events[0].providerMessageId = "TurnStatus";
-    await callIngestionV2(db, first, `${WORKSPACE_ID}/chatgpt/2026/09/14/${first.batchId}.json`);
-
-    const corrected = validBatchV2({ batchId: "8453ae63-3211-468c-8852-dd159c22a31f" });
-    corrected.events[0].eventId = "evt_sequence_fallback";
-    corrected.events[0].providerMessageId = null;
-    corrected.events[0].capturedAt = "2026-09-14T14:02:00.000Z";
-    await callIngestionV2(
-      db,
-      corrected,
-      `${WORKSPACE_ID}/chatgpt/2026/09/14/${corrected.batchId}.json`,
-      "d".repeat(64)
-    );
-
+    first.events[0].providerMessageId = null;
+    await callIngestionV2(db, first, `${WORKSPACE_ID}/chatgpt/2026/10/24/${first.batchId}.json`);
+    const second = validBatchV2({ batchId: "8453ae63-3211-468c-8852-dd159c22a31f" });
+    Object.assign(second.events[0], { eventId: "evt_different_turn", providerMessageId: null,
+      text: "A different message on a partly loaded page.", contentHash: "9988aabb" });
+    assert.equal((await callIngestionV2(db, second, `${WORKSPACE_ID}/chatgpt/2026/10/24/${second.batchId}.json`, "d".repeat(64))).inserted, 1);
+    // Replaying an existing identity changes neither the count nor the first turn.
+    const replay = validBatchV2({ ...second, batchId: "8453ae63-3211-468c-8852-dd159c22a320" });
+    assert.equal((await callIngestionV2(db, replay, `${WORKSPACE_ID}/chatgpt/2026/10/24/${replay.batchId}.json`, "e".repeat(64))).duplicates, 1);
     await db.exec("reset role");
-    const events = await db.query("select event_key, provider_message_id from public.conversation_events");
-    assert.deepEqual(events.rows, [{ event_key: "evt_sequence_fallback", provider_message_id: null }]);
-  } finally {
-    await db.close();
-  }
+    const events = await db.query("select event_key, text_content as text from public.conversation_events order by id");
+    assert.deepEqual(events.rows, [
+      { event_key: first.events[0].eventId, text: first.events[0].text },
+      { event_key: second.events[0].eventId, text: second.events[0].text }
+    ]);
+  } finally { await db.close(); }
 });
 
 test("Gate 7 search ranks exact source excerpts and isolates workspaces", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     const otherUser = "5a59e218-44dc-4875-9e5e-10916c3a8ce4";
     await db.query("insert into auth.users (id) values ($1), ($2)", [USER_ID, otherUser]);
@@ -582,7 +731,7 @@ test("Gate 7 search ranks exact source excerpts and isolates workspaces", async 
 });
 
 test("Gate 6 settings use safe defaults and keep encrypted credentials server-only", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -626,7 +775,7 @@ test("Gate 6 settings use safe defaults and keep encrypted credentials server-on
 });
 
 test("summarizer settings and encrypted credentials save atomically", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -660,7 +809,7 @@ test("summarizer settings and encrypted credentials save atomically", async () =
 });
 
 test("Gate 6 job functions claim once and atomically persist checkpoint, claims, evidence, and usage", async () => {
-  const db = await migratedDatabase();
+  const db = await historicalClaimsDatabase();
   try {
     await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
     await db.query("insert into public.workspaces (id, owner_user_id, name) values ($1, $2, 'Test Memory')", [WORKSPACE_ID, USER_ID]);
@@ -832,4 +981,173 @@ test("Gate 6 job functions claim once and atomically persist checkpoint, claims,
   } finally {
     await db.close();
   }
+});
+
+
+test("mobile evidence commits atomically, rejects contradictions, and keeps source dates unknown", async () => {
+  const db = await historicalClaimsDatabase();
+  try {
+    await db.exec(await readFile(new URL("../supabase/migrations/20261002062250_mobile_capture_evidence.sql", import.meta.url), "utf8"));
+    await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
+    await db.query("insert into public.workspaces (id, owner_user_id) values ($1, $2)", [WORKSPACE_ID, USER_ID]);
+    const batch = validBatchV2({ surface: "android", reason: "accessibility", coverage: { state: "partial", gapBefore: true, backfillAvailable: false } });
+    batch.captureClient.type = "accessibility";
+    batch.captureClient.os = "android";
+    const evidence = { version: 1, conversationIdentity: "local_session", messageIdentity: "local_sequence", timestampBasis: "observed", orderBasis: "session_sequence", completeness: "unknown", titleBasis: "placeholder" };
+    Object.assign(batch.events[0], { conversationId: "android-session:test", sourceLocator: "android-session:test", sourceUrl: null, providerMessageId: null, messageTimestamp: null, captureEvidence: evidence });
+    const rpc = "ingest_capture_batch_v2_evidence";
+    await db.exec("set role authenticated");
+    await assert.rejects(() => callIngestionV2(db, batch, `${WORKSPACE_ID}/chatgpt/2026/10/02/${batch.batchId}.json`, "a".repeat(64), rpc));
+    await db.exec("reset role; set role service_role");
+    const receipt = await callIngestionV2(db, batch, `${WORKSPACE_ID}/chatgpt/2026/10/02/${batch.batchId}.json`, "a".repeat(64), rpc);
+    assert.equal(receipt.inserted, 1);
+    assert.equal((await callIngestionV2(db, batch, `${WORKSPACE_ID}/chatgpt/2026/10/02/${batch.batchId}.json`, "a".repeat(64), rpc)).idempotentReplay, true);
+    await db.exec("reset role");
+    const event = (await db.query("select capture_evidence, message_timestamp, captured_at, source_locator from public.conversation_events")).rows[0];
+    assert.deepEqual(event.capture_evidence, evidence);
+    assert.equal(event.message_timestamp, null);
+    assert.equal(event.source_locator, "android-session:test");
+    await db.exec("set role service_role");
+    const rollup = (await db.query("select * from public.conversation_activity_rollup($1)", [WORKSPACE_ID])).rows[0];
+    assert.equal(rollup.source_message_at, null);
+    assert.equal(rollup.first_new_content_at, null);
+    const bad = structuredClone(batch);
+    bad.batchId = "90000000-0000-4000-8000-000000000099";
+    bad.events[0].eventId = "evt_invalid_evidence";
+    bad.events[0].captureEvidence.completeness = "complete";
+    await assert.rejects(() => callIngestionV2(db, bad, `${WORKSPACE_ID}/chatgpt/2026/10/02/${bad.batchId}.json`, "b".repeat(64), rpc), /capture_evidence_valid/);
+    await db.exec("reset role");
+    assert.equal((await db.query("select count(*)::int as count from public.ingestion_batches")).rows[0].count, 1);
+    assert.equal((await db.query("select count(*)::int as count from public.conversation_events")).rows[0].count, 1);
+  } finally { await db.close(); }
+});
+
+test("deletion records accept every supported browser and desktop source", async () => {
+  const db = await historicalClaimsDatabase();
+  try {
+    await db.query('insert into auth.users (id) values ($1)',[USER_ID]);
+    await db.query('insert into public.workspaces (id,owner_user_id) values ($1,$2)',[WORKSPACE_ID,USER_ID]);
+    for (const provider of ['chatgpt','claude','gemini','codex','claude_code','antigravity']) {
+      await db.query('insert into public.deleted_conversations (workspace_id,provider,provider_conversation_id) values ($1,$2,$3)',[WORKSPACE_ID,provider,'disposable:'+provider]);
+    }
+    assert.equal((await db.query('select count(*)::int as n from public.deleted_conversations')).rows[0].n,6);
+  } finally {await db.close();}
+});
+
+test("archive chunk completion advances safely and cannot finish a newer deletion", async () => {
+  const db=await historicalClaimsDatabase();
+  try {
+    await db.query('insert into auth.users (id) values ($1)',[USER_ID]);
+    await db.query('insert into public.workspaces (id,owner_user_id) values ($1,$2)',[WORKSPACE_ID,USER_ID]);
+    const op='10000000-0000-4000-8000-000000000001',next='10000000-0000-4000-8000-000000000002';
+    await db.query(`insert into public.deleted_conversations(workspace_id,provider,provider_conversation_id,operation_id,archive_cleanup_keys)
+      values ($1,'chatgpt','source',$2,array['old-a','old-b'])`,[WORKSPACE_ID,op]);
+    const call=async(operation,results)=>(await db.query(`select public.finish_chat_archive_chunk($1,'chatgpt','source',$2,$3::jsonb) as result`,[WORKSPACE_ID,operation,JSON.stringify(results)])).rows[0].result;
+    await db.exec('set role authenticated');
+    await assert.rejects(()=>call(op,[]),/permission denied/);
+    await db.exec('reset role; set role service_role');
+    assert.equal((await call(op,[{key:'old-a',missing:true}])).pending,true);
+    assert.equal((await call(op,[{key:'old-a',missing:true}])).pending,true);
+    await db.exec('reset role');
+    assert.deepEqual((await db.query('select archive_cleanup_keys from public.deleted_conversations')).rows[0].archive_cleanup_keys,['old-b']);
+    await db.query('update public.deleted_conversations set operation_id=$1,archive_cleanup_keys=array[\'new-copy\'],archive_reconciled_at=null',[next]);
+    await db.exec('set role service_role');
+    assert.equal((await call(op,[{key:'old-b',missing:true}])).stale,true);
+    assert.equal((await call(next,[{key:'new-copy',missing:true}])).pending,false);
+    await db.exec('reset role');
+    const row=(await db.query('select archive_cleanup_keys,archive_reconciled_at from public.deleted_conversations')).rows[0];
+    assert.deepEqual(row.archive_cleanup_keys,[]);assert.ok(row.archive_reconciled_at);
+  } finally {await db.close();}
+});
+
+test("archive chunk index updates preserve the unrelated chat in a shared archive", async()=>{
+  const db=await historicalClaimsDatabase();
+  try{
+    await db.query('insert into auth.users(id) values ($1)',[USER_ID]);
+    await db.query('insert into public.workspaces(id,owner_user_id) values ($1,$2)',[WORKSPACE_ID,USER_ID]);
+    const batch=validBatch();batch.events[0].conversationId='remove-source';
+    batch.events.push({...batch.events[0],eventId:'evt_keep',conversationId:'keep-source',providerMessageId:'keep-message',text:'invented unrelated text'});
+    await db.exec('set role service_role');
+    const key=`${WORKSPACE_ID}/chatgpt/test/${batch.batchId}.json`;
+    await callIngestion(db,batch,key);
+    await db.exec('reset role');
+    const op='10000000-0000-4000-8000-000000000001';
+    await db.query(`insert into public.deleted_conversations(workspace_id,provider,provider_conversation_id,operation_id,archive_cleanup_keys)
+      values ($1,'chatgpt','remove-source',$2,array[$3::text])`,[WORKSPACE_ID,op,key]);
+    await db.query("delete from public.conversations where provider_conversation_id='remove-source'");
+    await db.exec('set role service_role');
+    const result=await db.query(`select public.finish_chat_archive_chunk($1,'chatgpt','remove-source',$2,$3::jsonb) as receipt`,[WORKSPACE_ID,op,JSON.stringify([{key,sha256:'b'.repeat(64),bytes:42,providerConversationIds:['keep-source']}])]);
+    assert.equal(result.rows[0].receipt.pending,false);
+    await db.exec('reset role');
+    const index=(await db.query('select payload_sha256,payload_bytes,provider_conversation_ids from public.ingestion_batches')).rows[0];
+    assert.equal(index.payload_sha256,'b'.repeat(64));assert.equal(Number(index.payload_bytes),42);assert.deepEqual(index.provider_conversation_ids,['keep-source']);
+    assert.equal((await db.query('select text_content from public.conversation_events')).rows[0].text_content,'invented unrelated text');
+  }finally{await db.close();}
+});
+
+test("current full schema preserves ten intentional turns and same-provider-ID revisions without copies", async () => {
+  const db = await migratedDatabase();
+  try {
+    await db.query("insert into auth.users (id) values ($1)",[USER_ID]);
+    await db.query("insert into public.workspaces (id,owner_user_id) values ($1,$2)",[WORKSPACE_ID,USER_ID]);
+    await db.exec("set role service_role");
+    const template=validBatchV2();
+    const turn=(i)=>({...template.events[0],eventId:`evt_turn_${i}`,providerMessageId:`message-${i}`,sequence:i,
+      role:i%2?"assistant":"user",text:i%2?`Invented reply ${i}`:"Please repeat this intentional prompt.",contentHash:`hash-${i}`});
+    const first={...template,events:Array.from({length:8},(_,i)=>turn(i))};
+    assert.equal((await callIngestionV2(db,first,`${WORKSPACE_ID}/chatgpt/2026/10/24/${first.batchId}.json`)).inserted,8);
+    const second={...template,batchId:"8453ae63-3211-468c-8852-dd159c22a321",events:Array.from({length:10},(_,i)=>turn(i))};
+    const result=await callIngestionV2(db,second,`${WORKSPACE_ID}/chatgpt/2026/10/24/${second.batchId}.json`,"d".repeat(64));
+    assert.equal(result.inserted,2);assert.equal(result.duplicates,8);
+    const revision={...template,batchId:"8453ae63-3211-468c-8852-dd159c22a322",events:[{...turn(9),eventId:"evt_new_adapter_key",text:"Corrected final reply",contentHash:"revised"}]};
+    assert.equal((await callIngestionV2(db,revision,`${WORKSPACE_ID}/chatgpt/2026/10/24/${revision.batchId}.json`,"e".repeat(64))).updated,1);
+    await db.exec("reset role");
+    const rows=(await db.query("select role,text_content as text from public.conversation_events order by sequence")).rows;
+    assert.equal(rows.length,10);assert.equal(rows[0].text,turn(0).text);assert.equal(rows[9].text,"Corrected final reply");
+    assert.equal((await db.query("select count(*)::int as n from public.conversation_events where role='user'")).rows[0].n,5);
+  } finally { await db.close(); }
+});
+
+test("forward mobile evidence upgrades the deployed baseline without replacing activity rules", async () => {
+  const db = await deployedBaselineWithoutMobile();
+  try {
+    const before = (await db.query("select pg_get_functiondef('public.conversation_activity_rollup(uuid)'::regprocedure) as body")).rows[0].body;
+    await db.exec(await readFile(mobileForwardMigration, "utf8"));
+    assert.equal((await db.query("select exists(select 1 from information_schema.columns where table_schema='public' and table_name='conversation_events' and column_name='capture_evidence') as present")).rows[0].present, true);
+    assert.equal((await db.query("select pg_get_functiondef('public.conversation_activity_rollup(uuid)'::regprocedure) as body")).rows[0].body, before);
+    await db.query("insert into auth.users (id) values ($1)", [USER_ID]);
+    await db.query("insert into public.workspaces (id,owner_user_id) values ($1,$2)", [WORKSPACE_ID,USER_ID]);
+    const batch = validBatchV2({surface:"android",reason:"accessibility",coverage:{state:"partial",gapBefore:true,backfillAvailable:false}});
+    batch.captureClient.type="accessibility";batch.captureClient.os="android";
+    const evidence={version:1,conversationIdentity:"local_session",messageIdentity:"local_sequence",timestampBasis:"observed",orderBasis:"session_sequence",completeness:"unknown",titleBasis:"placeholder"};
+    Object.assign(batch.events[0],{conversationId:"android-session:forward-test",sourceLocator:"android-session:forward-test",sourceUrl:null,providerMessageId:null,messageTimestamp:null,captureEvidence:evidence});
+    await db.exec("set role authenticated");
+    await assert.rejects(()=>callIngestionV2(db,batch,`${WORKSPACE_ID}/chatgpt/2026/10/25/${batch.batchId}.json`,"a".repeat(64),"ingest_capture_batch_v2_evidence"),/permission denied/);
+    await db.exec("reset role; set role service_role");
+    assert.equal((await callIngestionV2(db,batch,`${WORKSPACE_ID}/chatgpt/2026/10/25/${batch.batchId}.json`,"a".repeat(64),"ingest_capture_batch_v2_evidence")).inserted,1);
+    assert.equal((await callIngestionV2(db,batch,`${WORKSPACE_ID}/chatgpt/2026/10/25/${batch.batchId}.json`,"a".repeat(64),"ingest_capture_batch_v2_evidence")).idempotentReplay,true);
+    await db.exec("reset role");
+    const row=(await db.query("select capture_evidence,message_timestamp,provider_message_id from public.conversation_events")).rows[0];
+    assert.deepEqual(row,{capture_evidence:evidence,message_timestamp:null,provider_message_id:null});
+    const bad=structuredClone(batch);bad.batchId="90000000-0000-4000-8000-000000000199";bad.events[0].eventId="evt_forward_bad_evidence";bad.events[0].captureEvidence.completeness="complete";
+    await db.exec("set role service_role");
+    await assert.rejects(()=>callIngestionV2(db,bad,`${WORKSPACE_ID}/chatgpt/2026/10/25/${bad.batchId}.json`,"b".repeat(64),"ingest_capture_batch_v2_evidence"),/mobile_observation_valid/);
+    await db.exec("reset role");
+    assert.deepEqual((await db.query("select (select count(*)::int from public.ingestion_batches) as batches,(select count(*)::int from public.conversation_events) as events")).rows[0],{batches:1,events:1});
+    await db.exec("set role service_role");
+    const browser=validBatchV2();browser.batchId="90000000-0000-4000-8000-000000000200";
+    assert.equal((await callIngestionV2(db,browser,`${WORKSPACE_ID}/chatgpt/2026/10/25/${browser.batchId}.json`,"c".repeat(64))).inserted,1);
+  } finally {await db.close();}
+});
+
+test("forward mobile evidence also upgrades the local historical mobile schema",async()=>{
+  const db=await deployedBaselineWithoutMobile();
+  try {
+    await db.exec(await readFile(new URL("../supabase/migrations/20261002062250_mobile_capture_evidence.sql",import.meta.url),"utf8"));
+    const before=(await db.query("select pg_get_functiondef('public.conversation_activity_rollup(uuid)'::regprocedure) as body")).rows[0].body;
+    await db.exec(await readFile(mobileForwardMigration,"utf8"));
+    await db.exec(await readFile(mobileForwardMigration,"utf8"));
+    assert.equal((await db.query("select pg_get_functiondef('public.conversation_activity_rollup(uuid)'::regprocedure) as body")).rows[0].body,before);
+    assert.equal((await db.query("select has_function_privilege('authenticated','public.ingest_capture_batch_v2_evidence(uuid,uuid,uuid,text,text,text,text,text,text,text,bigint,jsonb,jsonb,jsonb,jsonb)','EXECUTE') as allowed")).rows[0].allowed,false);
+  } finally {await db.close();}
 });

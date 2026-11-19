@@ -9,7 +9,7 @@
   const REQUEST_EVENT = "sherry-capture-request";
   const RESPONSE_EVENT = "sherry-capture-response";
   const READY_EVENT = "sherry-capture-ready";
-  const allowedTypes = new Set(["GET_STATUS", "UPDATE_SETTINGS", "UPDATE_INGESTION_CONFIG", "RETRY_UPLOADS", "REUPLOAD_EXISTING"]);
+  const allowedTypes = new Set(["GET_STATUS", "UPDATE_SETTINGS", "UPDATE_INGESTION_CONFIG", "CLEAR_INGESTION_CONFIG", "RETRY_UPLOADS", "REUPLOAD_EXISTING"]);
   const requests = new Map();
 
   function runtimeMessage(message) {

@@ -2,8 +2,13 @@
   "manifest_version": 3,
   "name": "Sherry Capture",
   "description": "Captures supported AI conversations and keeps them synced to the shared-memory service.",
-  "version": "0.4.12",
-  "permissions": ["activeTab", "storage", "alarms", "scripting"],
+  "version": "0.4.25",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "alarms",
+    "scripting"
+  ],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
@@ -22,30 +27,8 @@
     ]
   },
   "background": {
-    "scripts": ["src/background.js"],
     "service_worker": "src/background.js",
     "type": "module"
-  },
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "shared-memory-capture@memory.local",
-      "strict_min_version": "140.0",
-      "data_collection_permissions": {
-        "required": [
-          "personallyIdentifyingInfo",
-          "healthInfo",
-          "financialAndPaymentInfo",
-          "authenticationInfo",
-          "personalCommunications",
-          "browsingActivity",
-          "websiteContent"
-        ],
-        "optional": ["technicalAndInteraction"]
-      }
-    },
-    "gecko_android": {
-      "strict_min_version": "142.0"
-    }
   },
   "action": {
     "default_title": "Sherry Capture",
@@ -53,8 +36,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://shared-memory-ingestion.mufaddal-m25.workers.dev/*"],
-      "js": ["src/sherry-bridge.js"],
+      "matches": [
+        "https://shared-memory-ingestion.mufaddal-m25.workers.dev/*"
+      ],
+      "js": [
+        "src/sherry-bridge.js"
+      ],
       "run_at": "document_idle"
     },
     {
@@ -62,17 +49,32 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
-      "js": ["src/core.js", "src/chatgpt-adapter.js"],
+      "js": [
+        "src/core.js",
+        "src/chatgpt-adapter.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://claude.ai/*"],
-      "js": ["src/core.js", "src/web-provider-adapter.js", "src/claude-adapter.js"],
+      "matches": [
+        "https://claude.ai/*"
+      ],
+      "js": [
+        "src/core.js",
+        "src/web-provider-adapter.js",
+        "src/claude-adapter.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://gemini.google.com/*"],
-      "js": ["src/core.js", "src/web-provider-adapter.js", "src/gemini-adapter.js"],
+      "matches": [
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "src/core.js",
+        "src/web-provider-adapter.js",
+        "src/gemini-adapter.js"
+      ],
       "run_at": "document_idle"
     }
   ]

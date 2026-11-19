@@ -230,3 +230,22 @@ test("rejects unsupported providers before making a network request", async () =
   );
   assert.equal(called, false);
 });
+
+
+test("summary input preserves mobile uncertainty and distinguishes capture time from original date", async () => {
+  const native = structuredClone(input);
+  native.newEvents[0] = { ...native.newEvents[0], capturedAt: "2026-10-02T06:00:00Z", messageTimestamp: null,
+    sequence: 499999, coverage: "partial", captureEvidence: { timestampBasis: "observed", completeness: "possibly_clipped", conversationIdentity: "local_session" } };
+  let body;
+  await summarizeCheckpoint(native, { provider: "anthropic", model: "claude-test", apiKey: "test-secret" }, {
+    fetch: async (_, options) => {
+      body = JSON.parse(options.body);
+      return jsonResponse({ id: "test", model: "claude-test", content: [{ type: "text", text: JSON.stringify(output) }], usage: { input_tokens: 10, output_tokens: 10 } });
+    }
+  });
+  assert.match(body.system, /original date is unknown/);
+  assert.match(body.system, /Never interpret relative dates/);
+  assert.match(body.messages[0].content, /"messageTimestamp":null/);
+  assert.match(body.messages[0].content, /"completeness":"possibly_clipped"/);
+  assert.match(body.messages[0].content, /"sequence":499999/);
+});

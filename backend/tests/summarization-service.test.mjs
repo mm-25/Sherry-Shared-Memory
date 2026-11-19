@@ -156,6 +156,64 @@ test("unchanged terminal failures are blocked before another model call", async 
   assert.equal(harness.calls.some((call) => call.path.endsWith("/rpc/enqueue_summarization_job")), false);
 });
 
+test("the scheduler does not turn an unchanged rejected key into a fresh settings change", async () => {
+  const harness = await serviceHarness({
+    terminalFailure: {
+      conversation_id: CONVERSATION_ID,
+      new_event_ids: [10, 11],
+      overlap_event_ids: [],
+      event_revisions: { "10": 1, "11": 1 },
+      provider: "xai",
+      model: "grok-test",
+      prompt_version: "checkpoint-v1-runtime-5",
+      error_code: "provider_authentication_failed",
+      created_at: "2026-09-15T14:10:00.000Z"
+    }
+  });
+  const result = await runSummarizationCycle({ workspaceId: WORKSPACE_ID, reason: "scheduled" }, harness.env, {
+    fetch: (input, options) => {
+      const url = new URL(input);
+      if (url.pathname.endsWith("/summarization_jobs") && url.searchParams.get("status") === "eq.pending") {
+        return Response.json([]);
+      }
+      return harness.fetch(input, options);
+    },
+    summarize: () => { throw new Error("The rejected key must not be retried."); },
+    now: NOW
+  });
+  assert.equal(result.status, "protected");
+  assert.equal(harness.calls.some((call) => call.path.endsWith("/rpc/enqueue_summarization_job")), false);
+  const schedulerUpdate = harness.calls.find((call) => call.path.endsWith("/summarizer_settings") && call.method === "PATCH");
+  assert.deepEqual(schedulerUpdate.body, { last_scheduled_at: NOW.toISOString() });
+});
+
+test("new chat content does not retry a rejected key until the settings change", async () => {
+  const harness = await serviceHarness({
+    sourceEvents: [...events, {
+      id: 12, conversation_id: CONVERSATION_ID, role: "user", text_content: "A later update.",
+      revision: 1, captured_at: "2026-09-15T14:05:00.000Z", last_captured_at: "2026-09-15T14:05:00.000Z"
+    }],
+    terminalFailure: {
+      conversation_id: CONVERSATION_ID,
+      new_event_ids: [10, 11],
+      overlap_event_ids: [],
+      event_revisions: { "10": 1, "11": 1 },
+      provider: "xai",
+      model: "grok-test",
+      prompt_version: "checkpoint-v1-runtime-5",
+      error_code: "provider_authentication_failed",
+      created_at: "2026-09-15T14:10:00.000Z"
+    }
+  });
+  const result = await runSummarizationCycle({ workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID, reason: "manual" }, harness.env, {
+    fetch: harness.fetch,
+    summarize: () => { throw new Error("A new message cannot repair the rejected key."); },
+    now: NOW
+  });
+  assert.equal(result.status, "protected");
+  assert.equal(harness.calls.some((call) => call.path.endsWith("/rpc/enqueue_summarization_job")), false);
+});
+
 test("saving summarizer settings after an authentication failure allows one fresh model call", async () => {
   const harness = await serviceHarness({
     settingsOverride: { updated_at: "2026-09-15T14:05:00.000Z" },

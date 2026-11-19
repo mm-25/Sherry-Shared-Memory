@@ -9,15 +9,17 @@ function setOriginalChatLink(link, sourceUrl) {
   if (valid) link.href = sourceUrl;
   else link.removeAttribute("href");
 }
-const { messageTime, sort: sortedTranscriptEvents } = globalThis.SherryTranscriptOrder;
+const { messageTime, observationLabel, sort: sortedTranscriptEvents } = globalThis.SherryTranscriptOrder;
 const isPreview = new URLSearchParams(location.search).get("preview") === "1";
 const LOCAL_APP_HOSTS = new Set(["localhost", "127.0.0.1"]);
 const API_BASE = location.protocol === "file:" || LOCAL_APP_HOSTS.has(location.hostname) ? WORKER_URL : "";
-let session = JSON.parse(localStorage.getItem("memory_session") || "null");
+const authClient = globalThis.SherryAuth.createClient();
+let session = authClient.readSession();
 let workspace = null;
 let conversations = [];
 let selected = null;
 let exportPayload = null;
+let exportBusy = false;
 let summarizerSettings = null;
 let summaries = null;
 let memoryData = null;
@@ -35,14 +37,25 @@ let reviewMode = "all";
 const deferredConflictIds = new Set();
 let memoryGraph = null;
 let mapMatchId = null;
+let refreshingChatMemory = false;
+let deletingChats = false;
+const selectedChatIds = new Set();
+let bulkDeleteTarget = null;
+const NEW_CHAT_WINDOW_MS = 5 * 60 * 1000;
+let newChatExpiryTimer = null;
+let seenNewChatStorageKey = null;
+let seenNewChatExpiries = {};
+const CHAT_SORT_OPTIONS = new Set(["recent", "oldest", "title-asc", "title-desc", "most-messages"]);
+let chatSort = CHAT_SORT_OPTIONS.has(localStorage.getItem("sherry_chat_sort")) ? localStorage.getItem("sherry_chat_sort") : "recent";
+let chatView = localStorage.getItem("sherry_chat_view") === "table" ? "table" : "grid";
 let conversationFilters = { query: "", provider: "all", device: "all", date: "all", dateFrom: "", dateTo: "", artifacts: "all" };
 let conflictFilters = { query: "", sort: "newest", page: 1, pageSize: 10 };
 
 const previewConversations = [
-  { id: "preview-1", provider: "chatgpt", title: "Memory platform — product direction", last_captured_at: new Date(Date.now() - 36e5).toISOString(), conversation_events: [{ count: 28 }], events: [{ role: "user", text_content: "I want one memory layer that works across the AI tools I already use." }, { role: "assistant", text_content: "The product can separate capture, durable memory, retrieval, and provider permissions." }] },
-  { id: "preview-2", provider: "claude", title: "Detailed design feedback preferences", last_captured_at: new Date(Date.now() - 864e5).toISOString(), conversation_events: [{ count: 14 }], events: [{ role: "user", text_content: "I prefer detailed design feedback with the reasoning explained clearly." }, { role: "assistant", text_content: "I will retain that as a reusable communication preference." }] },
+  { id: "preview-1", provider: "chatgpt", primary_surface: "web", title: "Memory platform — product direction", created_at: new Date(Date.now() - 2 * 60e3).toISOString(), last_captured_at: new Date(Date.now() - 60e3).toISOString(), conversation_events: [{ count: 28 }], events: [{ role: "user", text_content: "I want one memory layer that works across the AI tools I already use." }, { role: "assistant", text_content: "The product can separate capture, durable memory, retrieval, and provider permissions." }] },
+  { id: "preview-2", provider: "claude", primary_surface: "desktop", title: "Detailed design feedback preferences", last_captured_at: new Date(Date.now() - 864e5).toISOString(), conversation_events: [{ count: 14 }], events: [{ role: "user", text_content: "I prefer detailed design feedback with the reasoning explained clearly." }, { role: "assistant", text_content: "I will retain that as a reusable communication preference." }] },
   { id: "preview-3", provider: "gemini", title: "Research synthesis for shared memory", last_captured_at: new Date(Date.now() - 2 * 864e5).toISOString(), conversation_events: [{ count: 19 }], events: [{ role: "user", text_content: "Compare approaches to user-owned cloud memory." }, { role: "assistant", text_content: "A fast indexed layer can sync with user-controlled export storage." }] },
-  { id: "preview-4", provider: "chatgpt", title: "Memory Test 4", last_captured_at: new Date(Date.now() - 3 * 864e5).toISOString(), conversation_events: [{ count: 11 }], events: [{ role: "user", text_content: "Project updates should be short bullet points." }, { role: "assistant", text_content: "Understood." }] },
+  { id: "preview-4", provider: "chatgpt", primary_surface: "android", title: "Memory Test 4", last_captured_at: new Date(Date.now() - 3 * 864e5).toISOString(), conversation_events: [{ count: 11 }], events: [{ role: "user", text_content: "Project updates should be short bullet points." }, { role: "assistant", text_content: "Understood." }] },
   { id: "preview-5", provider: "claude", title: "Gate 8 interface review", last_captured_at: new Date(Date.now() - 5 * 864e5).toISOString(), conversation_events: [{ count: 22 }], events: [{ role: "user", text_content: "The interface should make source evidence easy to reach." }, { role: "assistant", text_content: "Each memory can link back to its exact conversation." }] },
   { id: "preview-6", provider: "gemini", title: "Capture policy decisions", last_captured_at: new Date(Date.now() - 7 * 864e5).toISOString(), conversation_events: [{ count: 17 }], events: [{ role: "user", text_content: "Attachments and temporary chats should stay off by default." }, { role: "assistant", text_content: "Those defaults reduce storage and accidental capture." }] }
 ];
@@ -67,7 +80,7 @@ const previewMemoryData = {
 };
 
 function providerLabel(provider) {
-  return ({ chatgpt: "ChatGPT", codex: "Codex", claude: "Claude", claude_code: "Claude Code", gemini: "Gemini", antigravity: "Antigravity", grok: "Grok", openai: "OpenAI", anthropic: "Claude", google: "Gemini", generic: "Other AI" }[provider] || provider || "Unknown");
+  return ({ chatgpt: "ChatGPT", codex: "Codex", claude: "Claude", claude_desktop: "Claude Desktop", "claude-desktop": "Claude Desktop", claude_code: "Claude Code", gemini: "Gemini", antigravity: "Antigravity", grok: "Grok", openai: "OpenAI", anthropic: "Claude", google: "Gemini", generic: "Other AI" }[provider] || provider || "Unknown");
 }
 
 function platformLabel(platform) {
@@ -441,7 +454,7 @@ function openMetricDialog(metric) {
   }
   if (metric === "retrieval") {
     const items = dashboardData.retrieval?.byTool || [];
-    return setMetricDialog("MEMORY RETRIEVAL BY AI", "Successful memory searches by AI", "A lookup is counted only when a connected AI tool searches Sherry and receives memory results. Dashboard tests are excluded.", [metricStat(dashboardData.retrieval?.total || 0, "successful lookups"), metricStat(items.length, "AI tools")], items.length ? [metricRows(items, [
+    return setMetricDialog("MEMORY RETRIEVAL BY AI", "Successful memory searches by AI", "A lookup is counted when a connected AI tool received at least one memory that is still stored in Sherry. Lookups containing only deleted memories and Dashboard tests are excluded.", [metricStat(dashboardData.retrieval?.total || 0, "successful lookups"), metricStat(items.length, "AI tools")], items.length ? [metricRows(items, [
       { strong: true, value: (item) => providerLabel(item.tool) },
       { value: (item) => "Authenticated memory.search calls" },
       { strong: true, value: (item) => `${item.count} lookup${item.count === 1 ? "" : "s"}` }
@@ -460,8 +473,12 @@ function openMetricDialog(metric) {
 }
 
 function providerIcon(provider) {
-  const key = ({ openai: "chatgpt", anthropic: "claude", google: "gemini", xai: "grok" }[provider] || provider || "unknown");
+  const key = ({ openai: "chatgpt", anthropic: "claude", claude_desktop: "claude", "claude-desktop": "claude", google: "gemini", xai: "grok" }[provider] || provider || "unknown");
+  // Codex: LobeHub Icons (MIT; see vendor/lobehub-icons.LICENSE.txt).
+  // Antigravity: https://www.antigravity.google/press, one-color SVG.
   const icons = {
+    codex: '<svg aria-hidden="true" fill="currentColor" fill-rule="evenodd" viewBox="0 0 24 24"><path clip-rule="evenodd" d="M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z"></path></svg>',
+    antigravity: '<svg aria-hidden="true" viewBox="0 0 180 180" fill="none"><path d="M144.248 149.062C151.748 154.688 162.998 150.938 152.685 140.625C121.748 110.625 128.31 28.125 89.8727 28.125C51.4352 28.125 57.9977 110.625 27.0602 140.625C15.8102 151.875 27.9977 154.688 35.4977 149.062C64.5602 129.375 62.6852 94.6875 89.8727 94.6875C117.06 94.6875 115.185 129.375 144.248 149.062Z" fill="currentColor"/></svg>',
     chatgpt: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg>',
     claude: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/></svg>',
     gemini: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81"/></svg>',
@@ -494,9 +511,20 @@ function conversationActivityAt(conversation) {
 }
 
 function conversationActivityLabel(conversation) {
-  const basis = conversation?.last_activity_basis;
-  const label = basis === "source_message" ? "Last message" : basis === "first_captured_message" ? "Latest new content captured" : "Last synced";
-  return `${label} ${formatDateTime(conversationActivityAt(conversation))}`;
+  return `Updated on ${formatDateTime(conversationActivityAt(conversation))}`;
+}
+
+function captureSourceBadges(conversation) {
+  const group = document.createElement("span");
+  group.className = "capture-source-badges";
+  for (const source of globalThis.SherryCapturePresentation.sourceCategories(conversation)) {
+    const badge = document.createElement("span");
+    badge.className = `capture-source-badge source-${source.kind}`;
+    badge.textContent = source.label;
+    badge.title = source.description;
+    group.append(badge);
+  }
+  return group;
 }
 
 function isTransientTranscriptEvent(event) {
@@ -639,15 +667,13 @@ async function loadDiagnostics() {
 }
 
 async function refreshSession() {
-  if (!session?.refresh_token) return false;
-  const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
-    method: "POST",
-    headers: { apikey: SUPABASE_KEY, "content-type": "application/json" },
-    body: JSON.stringify({ refresh_token: session.refresh_token })
-  });
-  if (!response.ok) return false;
-  session = await response.json();
-  localStorage.setItem("memory_session", JSON.stringify(session));
+  const latest = authClient.readSession();
+  if (latest?.access_token && latest.access_token !== session?.access_token) {
+    session = latest;
+    return true;
+  }
+  if (!latest?.refresh_token) return false;
+  session = await authClient.refresh();
   return true;
 }
 
@@ -659,7 +685,14 @@ async function supabase(path, options = {}) {
 async function api(path, options = {}) {
   const request = () => fetch(`${API_BASE}${path}`, { ...options, headers: { authorization: `Bearer ${session?.access_token || ""}`, ...options.headers } });
   let response = await request();
-  if (response.status === 401 && await refreshSession().catch(() => false)) response = await request();
+  if (response.status === 401) {
+    try { if (await refreshSession()) response = await request(); }
+    catch (error) {
+      // Revoked credentials require sign-in; an unavailable renewal service does
+      // not establish revocation and must not erase a still-renewable session.
+      if (error.status !== 400 && error.status !== 401) throw error;
+    }
+  }
   if (!response.ok) {
     const message = (await response.json().catch(() => ({}))).error?.message;
     const error = new Error(message || (response.status === 401 ? "Session expired. Please sign in again." : "Request failed"));
@@ -862,7 +895,7 @@ function extensionBridgeRequest(message, { retry = false, timeoutMs = 5000 } = {
       const detected = document.documentElement.dataset.sherryCaptureBridge;
       reject(new Error(detected
         ? `Sherry Capture v${detected} is present, but its background process did not respond.`
-        : "No Sherry Capture page bridge is active. Use Sherry Capture 0.4.9 for automatic recovery on ChatGPT, Claude, and Gemini tabs, then reconnect this Sherry tab from the add-on popup."));
+        : "No Sherry Capture page connector is active. Reload the existing Sherry Capture extension, then reload this Sherry page in the same browser."));
     }, timeoutMs);
     window.addEventListener("message", receive);
     document.addEventListener("sherry-capture-response", receiveEvent);
@@ -903,19 +936,34 @@ function extensionMessage(message) {
   if (!runtime?.sendMessage) return bridgedExtensionMessage(message);
   return new Promise((resolve, reject) => {
     let settled = false;
-    const finish = (response) => {
+    const fail = (error) => {
       if (settled) return;
       settled = true;
+      // An absent receiver means this route did not deliver the operation.
+      // Never replay an uncertain timeout or an application-level denial.
+      if (/receiving end does not exist/i.test(error?.message || "")
+          && document.getElementById("sherry-capture-bridge")) {
+        bridgedExtensionMessage(message).then(resolve, reject);
+      } else {
+        reject(error);
+      }
+    };
+    const finish = (response) => {
+      if (settled) return;
       const runtimeError = globalThis.chrome?.runtime?.lastError;
-      if (runtimeError) reject(new Error(runtimeError.message));
-      else if (!response?.ok) reject(new Error(response?.error || "The extension did not accept the request."));
+      if (runtimeError) {
+        fail(new Error(runtimeError.message));
+        return;
+      }
+      settled = true;
+      if (!response?.ok) reject(new Error(response?.error || "The extension did not accept the request."));
       else resolve(response);
     };
     try {
       const result = runtime.sendMessage(EXTENSION_ID, message, finish);
-      if (result?.then) result.then(finish).catch(reject);
+      if (result?.then) result.then(finish).catch(fail);
     } catch (error) {
-      reject(error);
+      fail(error);
     }
   });
 }
@@ -929,14 +977,17 @@ function setExtensionControlsDisabled(disabled) {
 function renderExtensionDiagnostics(data, errorMessage = "") {
   if (!$("diagnosticsExtensionEvents")) return;
   if (!data) {
-    $("diagnosticsExtensionState").textContent = "No page bridge";
+    const connectorPresent = Boolean(document.getElementById("sherry-capture-bridge"));
+    $("diagnosticsExtensionState").textContent = connectorPresent ? "Connector present · not connected" : "No page bridge";
     $("diagnosticsExtensionState").className = "status-pill provisional";
     const empty = document.createElement("div");
     empty.className = "diagnostic-extension-empty";
     const title = document.createElement("strong");
-    title.textContent = "Browser-local events unavailable in this tab";
+    title.textContent = connectorPresent ? "The capture background did not respond" : "Browser-local events unavailable in this tab";
     const copy = document.createElement("p");
-    copy.textContent = "This does not mean cloud capture is unhealthy. To see browser-local events, open Sherry in the browser where Sherry Capture is installed and reconnect this tab from the extension popup.";
+    copy.textContent = connectorPresent
+      ? "Sherry can see the page connector, but the extension connection is unavailable. Refresh status. If it still fails, reload the existing Sherry Capture extension in Brave, then reload this page. Keep the extension installed to preserve saved messages."
+      : "Open Sherry in the browser where Sherry Capture is installed, then reload this page. Cloud pipeline status above is independent of this browser connection.";
     empty.append(title, copy);
     $("diagnosticsExtensionEvents").replaceChildren(empty);
     return;
@@ -1078,29 +1129,197 @@ function filteredConversations() {
   });
 }
 
-function render() {
-  const visible = filteredConversations();
-  const filtersActive = Boolean(conversationFilters.query) || conversationFilters.provider !== "all" || conversationFilters.device !== "all" || conversationFilters.date !== "all" || conversationFilters.artifacts !== "all";
-  $("status").classList.toggle("hidden", conversations.length > 0 && !filtersActive);
-  $("status").textContent = conversations.length
-    ? `${visible.length} of ${conversations.length} conversation${conversations.length === 1 ? "" : "s"}`
-    : "No captured conversations yet.";
-  $("conversations").replaceChildren(...(visible.length ? visible.map((item) => {
+function chatMessageCount(item) {
+  return Number(item.conversation_events?.[0]?.count ?? item.message_count ?? 0) || 0;
+}
+
+function sortConversations(items, sort = chatSort) {
+  const title = (item) => String(item.title || "Untitled conversation");
+  const activity = (item) => new Date(conversationActivityAt(item) || 0).getTime() || 0;
+  return [...items].sort((left, right) => {
+    let difference = 0;
+    if (sort === "oldest") difference = activity(left) - activity(right);
+    else if (sort === "title-asc") difference = title(left).localeCompare(title(right), undefined, { sensitivity: "base" });
+    else if (sort === "title-desc") difference = title(right).localeCompare(title(left), undefined, { sensitivity: "base" });
+    else if (sort === "most-messages") difference = chatMessageCount(right) - chatMessageCount(left);
+    else difference = activity(right) - activity(left);
+    return difference || title(left).localeCompare(title(right), undefined, { sensitivity: "base" }) || String(left.id).localeCompare(String(right.id));
+  });
+}
+
+function newChatExpiryAt(item) {
+  const created = Date.parse(item?.created_at || "");
+  return Number.isFinite(created) ? created + NEW_CHAT_WINDOW_MS : 0;
+}
+
+function seenNewChats() {
+  const key = `sherry_seen_new_chats:${workspace?.id || "preview"}`;
+  if (seenNewChatStorageKey !== key) {
+    seenNewChatStorageKey = key;
+    try {
+      const stored = JSON.parse(localStorage.getItem(key) || "{}");
+      seenNewChatExpiries = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+    } catch {
+      seenNewChatExpiries = {};
+    }
+  }
+  return seenNewChatExpiries;
+}
+
+function isNewChat(item, now = Date.now()) {
+  const expires = newChatExpiryAt(item);
+  return expires > now && expires - NEW_CHAT_WINDOW_MS <= now && !seenNewChats()[item.id];
+}
+
+function markChatSeen(id) {
+  const item = conversations.find((chat) => chat.id === id);
+  if (!item || !isNewChat(item)) return false;
+  const seen = seenNewChats();
+  seen[id] = newChatExpiryAt(item);
+  localStorage.setItem(seenNewChatStorageKey, JSON.stringify(seen));
+  return true;
+}
+
+function scheduleNewChatExpiry(now = Date.now()) {
+  if (newChatExpiryTimer) clearTimeout(newChatExpiryTimer);
+  const expiries = conversations.filter((item) => isNewChat(item, now)).map(newChatExpiryAt);
+  if (!expiries.length) { newChatExpiryTimer = null; return; }
+  newChatExpiryTimer = setTimeout(() => { newChatExpiryTimer = null; render(); }, Math.max(0, Math.min(...expiries) - now + 20));
+}
+
+function newChatBadge() {
+  const badge = document.createElement("span");
+  badge.className = "new-chat-badge";
+  badge.textContent = "New";
+  return badge;
+}
+
+function chatCheckbox(item) {
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "chat-row-checkbox";
+  checkbox.dataset.conversationId = item.id;
+  checkbox.setAttribute("aria-label", `Select ${item.title || "Untitled conversation"}`);
+  checkbox.checked = selectedChatIds.has(item.id);
+  checkbox.disabled = deletingChats;
+  checkbox.onchange = () => {
+    if (checkbox.checked) selectedChatIds.add(item.id);
+    else selectedChatIds.delete(item.id);
+    render();
+    [...document.querySelectorAll("#conversations input[data-conversation-id]")].find((target) => target.dataset.conversationId === item.id)?.focus();
+  };
+  return checkbox;
+}
+
+function renderChatTable(items) {
+  const table = document.createElement("table");
+  table.className = "conversation-table";
+  table.innerHTML = '<thead><tr><th scope="col" class="select-column"></th><th scope="col">Chat</th><th scope="col">Platform</th><th scope="col">Messages</th><th scope="col">Updated on</th></tr></thead><tbody></tbody>';
+  const headerSelect = document.createElement("input");
+  headerSelect.type = "checkbox";
+  headerSelect.className = "chat-row-checkbox";
+  headerSelect.setAttribute("aria-label", "Select all visible chats");
+  headerSelect.checked = items.every((item) => selectedChatIds.has(item.id));
+  headerSelect.indeterminate = !headerSelect.checked && items.some((item) => selectedChatIds.has(item.id));
+  headerSelect.disabled = deletingChats;
+  headerSelect.onchange = () => {
+    for (const item of items) {
+      if (headerSelect.checked) selectedChatIds.add(item.id);
+      else selectedChatIds.delete(item.id);
+    }
+    render();
+    $("conversations").querySelector(".conversation-table thead input")?.focus();
+  };
+  table.querySelector("thead th").append(headerSelect);
+  const body = table.querySelector("tbody");
+  for (const item of items) {
+    const row = document.createElement("tr");
+    row.classList.toggle("selected", selectedChatIds.has(item.id));
+    const selectCell = document.createElement("td");
+    selectCell.className = "select-column";
+    selectCell.append(chatCheckbox(item));
+    const titleCell = document.createElement("td");
     const button = document.createElement("button");
-    button.className = "conversation";
-    const count = item.conversation_events?.[0]?.count || item.message_count || 0;
-    const summary = summaryForConversation(item);
-    const description = truncateText(summary?.summary_text, 190) || "No conversation summary has been created yet.";
-    button.innerHTML = `<div class="conversation-head"><span class="provider-slot"></span><span class="conversation-arrow" aria-hidden="true">→</span></div><h3></h3><p class="conversation-summary"></p><div class="meta"><span>${count} ${count === 1 ? "msg" : "msgs"}</span><span></span></div>`;
-    button.querySelector(".provider-slot").replaceWith(providerIcon(item.provider));
-    button.querySelector("h3").textContent = item.title || "Untitled conversation";
-    button.querySelector(".conversation-summary").textContent = description;
-    const activity = button.querySelector(".meta span:last-child");
+    button.type = "button";
+    button.className = "conversation-row-button";
+    button.dataset.conversationId = item.id;
+    const titleLine = document.createElement("span");
+    titleLine.className = "chat-title-line";
+    const title = document.createElement("strong");
+    title.textContent = item.title || "Untitled conversation";
+    titleLine.append(title);
+    if (isNewChat(item)) titleLine.append(newChatBadge());
+    const summary = document.createElement("small");
+    summary.textContent = truncateText(summaryForConversation(item)?.summary_text, 110) || "No summary yet";
+    button.append(titleLine, summary);
+    button.onclick = () => openConversation(item.id);
+    titleCell.append(button);
+    const provider = document.createElement("td");
+    provider.textContent = providerLabel(item.provider);
+    provider.append(document.createElement("br"), captureSourceBadges(item));
+    const messages = document.createElement("td");
+    messages.textContent = String(chatMessageCount(item));
+    const activity = document.createElement("td");
     activity.textContent = formatDateTime(conversationActivityAt(item));
     activity.title = conversationActivityLabel(item);
+    row.append(selectCell, titleCell, provider, messages, activity);
+    body.append(row);
+  }
+  return table;
+}
+
+function render() {
+  const visible = sortConversations(filteredConversations());
+  const availableIds = new Set(conversations.map((item) => item.id));
+  for (const id of selectedChatIds) if (!availableIds.has(id)) selectedChatIds.delete(id);
+  $("chatSort").value = chatSort;
+  $("chatGridView").setAttribute("aria-pressed", String(chatView === "grid"));
+  $("chatTableView").setAttribute("aria-pressed", String(chatView === "table"));
+  $("chatGridView").classList.toggle("active-segment", chatView === "grid");
+  $("chatTableView").classList.toggle("active-segment", chatView === "table");
+  $("conversations").classList.toggle("conversation-grid", chatView === "grid");
+  $("conversations").classList.toggle("conversation-table-wrap", chatView === "table");
+  $("chatSelectionActions").classList.toggle("hidden", !selectedChatIds.size);
+  $("chatSelectionCount").textContent = `${selectedChatIds.size} chat${selectedChatIds.size === 1 ? "" : "s"} selected`;
+  $("deleteSelectedChats").disabled = deletingChats || !selectedChatIds.size || isPreview;
+  $("selectVisibleChats").disabled = deletingChats || !visible.length;
+  $("clearSelectedChats").disabled = deletingChats || !selectedChatIds.size;
+  $("settingsDeleteChats").disabled = deletingChats || !conversations.length || isPreview;
+  $("status").classList.remove("hidden");
+  $("status").textContent = conversations.length
+    ? visible.length === conversations.length
+      ? `${visible.length} chat${visible.length === 1 ? "" : "s"}`
+      : `${visible.length} of ${conversations.length} chats`
+    : "No captured conversations yet.";
+  const cards = chatView === "grid" ? visible.map((item) => {
+    const card = document.createElement("article");
+    card.className = "conversation-card";
+    card.classList.toggle("selected", selectedChatIds.has(item.id));
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "conversation";
+    button.dataset.conversationId = item.id;
+    const count = chatMessageCount(item);
+    const summary = summaryForConversation(item);
+    const description = truncateText(summary?.summary_text, 190) || "No conversation summary has been created yet.";
+    button.innerHTML = `<div class="conversation-head"><span class="conversation-origin"><span class="provider-slot"></span></span><span class="conversation-arrow" aria-hidden="true">→</span></div><h3></h3><p class="conversation-summary"></p><div class="meta"><span>${count} ${count === 1 ? "msg" : "msgs"}</span><span></span></div>`;
+    button.querySelector(".provider-slot").replaceWith(providerIcon(item.provider));
+    button.querySelector(".conversation-origin").append(captureSourceBadges(item));
+    const heading = button.querySelector("h3");
+    heading.textContent = item.title || "Untitled conversation";
+    if (isNewChat(item)) heading.append(newChatBadge());
+    button.querySelector(".conversation-summary").textContent = description;
+    const activity = button.querySelector(".meta span:last-child");
+    activity.textContent = conversationActivityLabel(item);
+    activity.title = conversationActivityLabel(item);
     button.onclick = () => openConversation(item.id);
-    return button;
-  }) : [emptyState(conversations.length ? "No conversations match these Chat Memory filters." : "Captured conversations will appear here after the extension sends them to Memory.")]));
+    card.append(chatCheckbox(item), button);
+    return card;
+  }) : [];
+  $("conversations").replaceChildren(...(visible.length
+    ? chatView === "table" ? [renderChatTable(visible)] : cards
+    : [emptyState(conversations.length ? "No conversations match these Chat Memory filters." : "Captured conversations will appear here after the extension sends them to Memory.")]));
+  scheduleNewChatExpiry();
   renderDashboard();
 }
 
@@ -1117,6 +1336,127 @@ function updateConversationFilters() {
     artifacts: $("artifactFilter").value
   };
   render();
+}
+
+async function refreshChatMemory() {
+  if (refreshingChatMemory) return;
+  const button = $("refreshChatMemory");
+  const label = button.querySelector("span");
+  const status = $("chatMemoryRefreshStatus");
+  refreshingChatMemory = true;
+  button.disabled = true;
+  label.textContent = "Refreshing…";
+  status.classList.remove("error");
+  status.textContent = "Checking for updated chats…";
+  try {
+    if (isPreview) {
+      status.textContent = "Sample data cannot refresh.";
+      return;
+    }
+    if (!workspace?.id) throw new Error("No active workspace is available.");
+    const [chatResult, summaryResult] = await Promise.allSettled([
+      api(`/v1/conversations?workspaceId=${workspace.id}`, { cache: "no-store" }),
+      api(`/v1/summaries?workspaceId=${workspace.id}`, { cache: "no-store" })
+    ]);
+    if (chatResult.status === "rejected") throw chatResult.reason;
+    if (!Array.isArray(chatResult.value?.conversations)) throw new Error("The chat list was not returned.");
+    conversations = chatResult.value.conversations;
+    const summariesUpdated = summaryResult.status === "fulfilled" && Array.isArray(summaryResult.value?.summaries);
+    if (summariesUpdated) summaries = summaryResult.value.summaries;
+    render();
+    status.textContent = summariesUpdated ? "Checked just now." : "Chats updated; summaries could not refresh.";
+    status.classList.toggle("error", !summariesUpdated);
+  } catch (error) {
+    status.classList.add("error");
+    status.textContent = `Could not refresh chats: ${error.message}`;
+  } finally {
+    refreshingChatMemory = false;
+    button.disabled = false;
+    label.textContent = "Refresh";
+  }
+}
+
+function openBulkDeleteDialog(ids, allChats) {
+  if (!ids.length || deletingChats) return;
+  bulkDeleteTarget = { ids: [...new Set(ids)], allChats };
+  const count = bulkDeleteTarget.ids.length;
+  $("bulkDeleteTitle").textContent = allChats ? "Delete all chats from Sherry?" : `Delete ${count} selected chat${count === 1 ? "" : "s"}?`;
+  $("bulkDeleteDescription").textContent = allChats
+    ? `This will delete all ${count} chats currently stored in this workspace. If capture stays on, original provider chats can return to Sherry.`
+    : `This will delete the ${count} chats you selected in Chat Memory. If capture stays on, original provider chats can return to Sherry.`;
+  $("bulkDeleteConfirmationLabel").classList.toggle("hidden", !allChats);
+  $("bulkDeleteConfirmation").value = "";
+  $("bulkDeleteStatus").textContent = "";
+  $("confirmBulkDelete").disabled = allChats;
+  $("bulkDeleteDialog").showModal();
+}
+
+async function deleteChatBatch() {
+  if (!bulkDeleteTarget || deletingChats || !workspace?.id || isPreview) return;
+  const { ids, allChats } = bulkDeleteTarget;
+  if (allChats && $("bulkDeleteConfirmation").value !== "DELETE ALL CHATS") return;
+  deletingChats = true;
+  $("cancelBulkDelete").disabled = true;
+  $("confirmBulkDelete").disabled = true;
+  $("bulkDeleteDialog").close();
+  render();
+  let deleted = 0;
+  let cleanupPending = 0;
+  const failed = [];
+  const progress = (message) => {
+    $("chatBulkStatus").textContent = message;
+    $("settingsDeleteChatsStatus").textContent = message;
+  };
+  for (const id of ids) {
+    progress(`Deleting chats… ${deleted + failed.length} of ${ids.length} processed.`);
+    try {
+      const result = await api(`/v1/conversations/${encodeURIComponent(id)}?workspaceId=${encodeURIComponent(workspace.id)}`, { method: "DELETE" });
+      if (result?.deleted?.cleanupPending) cleanupPending += 1;
+      deleted += 1;
+      conversations = conversations.filter((chat) => chat.id !== id);
+      summaries = (summaries || []).filter((summary) => summary.conversation_id !== id);
+      selectedChatIds.delete(id);
+    } catch (error) {
+      if (error.status === 404) {
+        deleted += 1;
+        conversations = conversations.filter((chat) => chat.id !== id);
+        summaries = (summaries || []).filter((summary) => summary.conversation_id !== id);
+        selectedChatIds.delete(id);
+      } else {
+        failed.push(id);
+        if (error.status === 401 || error.status === 403) break;
+      }
+    }
+  }
+  try {
+    const [chatResult, summaryResult, dashboardResult] = await Promise.allSettled([
+      api(`/v1/conversations?workspaceId=${workspace.id}`, { cache: "no-store" }),
+      api(`/v1/summaries?workspaceId=${workspace.id}`, { cache: "no-store" }),
+      api(`/v1/dashboard?workspaceId=${workspace.id}`, { cache: "no-store" })
+    ]);
+    const chatsVerified = chatResult.status === "fulfilled" && Array.isArray(chatResult.value?.conversations);
+    if (chatsVerified) conversations = chatResult.value.conversations;
+    if (summaryResult.status === "fulfilled" && Array.isArray(summaryResult.value?.summaries)) summaries = summaryResult.value.summaries;
+    dashboardData = dashboardResult.status === "fulfilled" ? dashboardResult.value : dashboardFallbackFromConversations(conversations);
+    const remaining = new Set(conversations.map((chat) => chat.id));
+    if (selected && !remaining.has(selected.id)) selected = null;
+    if (selectedSummary && !remaining.has(selectedSummary.conversation_id)) selectedSummary = null;
+    const stillPresent = ids.filter((id) => remaining.has(id));
+    const confirmedRemoved = ids.length - stillPresent.length;
+    const newChats = allChats ? conversations.filter((chat) => !ids.includes(chat.id)).length : 0;
+    const message = !chatsVerified
+      ? `${deleted} deletion requests succeeded, but Sherry could not verify the remaining chat list. Refresh Chat Memory before retrying.`
+      : stillPresent.length
+        ? `${confirmedRemoved} of ${ids.length} chats deleted. ${stillPresent.length} remain; you can select them and retry.`
+        : `${confirmedRemoved} chat${confirmedRemoved === 1 ? "" : "s"} deleted from Sherry.${newChats ? ` ${newChats} newer chat${newChats === 1 ? " remains" : "s remain"}.` : ""}${cleanupPending ? ` Raw backup cleanup is still running for ${cleanupPending}.` : ""}`;
+    progress(message);
+  } catch (error) {
+    progress(`${deleted} chats deleted. Could not refresh the remaining list: ${error.message}`);
+  } finally {
+    deletingChats = false;
+    bulkDeleteTarget = null;
+    render();
+  }
 }
 
 function closeProviderMenu() {
@@ -1146,14 +1486,14 @@ function importTimestamp(value) {
 }
 
 function importMessageText(value) {
-  if (typeof value === "string") return value.trim();
-  if (Array.isArray(value)) return value.map(importMessageText).filter(Boolean).join("\n").trim();
-  if (!value || typeof value !== "object") return "";
-  if (typeof value.text === "string") return value.text.trim();
-  if (typeof value.message === "string") return value.message.trim();
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(importMessageText).filter((text) => text !== null).join("\n");
+  if (!value || typeof value !== "object") return null;
+  if (typeof value.text === "string") return value.text;
+  if (typeof value.message === "string") return value.message;
   if (Array.isArray(value.parts)) return importMessageText(value.parts);
   if (value.content != null) return importMessageText(value.content);
-  return "";
+  return null;
 }
 
 function importRole(message) {
@@ -1174,26 +1514,78 @@ function importAttachments(message) {
   }));
 }
 
-function normalizeImportMessage(message, index) {
-  const text = importMessageText(message?.content ?? message?.text ?? message?.message ?? message);
-  if (!text) return null;
+function importLocalIdentity(fileIdentity, index) {
+  if (!/^[a-f0-9]{64}$/.test(fileIdentity || "")) throw new Error("This export needs a verified file identity before importing records without source IDs.");
+  return `file:${fileIdentity}:row:${index}`;
+}
+
+function normalizeImportMessage(message, index, fileIdentity) {
+  const text = importMessageText(message?.content ?? message?.text ?? message?.message ?? message) || "";
+  if (!text.trim()) return null;
+  if (text.length > 240_000) {
+    throw new Error("An export message is longer than Sherry can store. No data was uploaded; the message was not shortened silently.");
+  }
   return {
-    id: String(message?.id || message?.uuid || message?.message_id || index),
+    id: String(message?.id || message?.uuid || message?.message_id || importLocalIdentity(fileIdentity, index)),
     role: importRole(message),
-    text: text.slice(0, 240_000),
-    timestamp: importTimestamp(message?.create_time || message?.created_at || message?.timestamp || message?.time),
+    text,
+    timestamp: importTimestamp(message?.create_time ?? message?.created_at ?? message?.timestamp ?? message?.time),
     attachments: importAttachments(message)
   };
 }
 
-function normalizeChatGptExport(data) {
+function normalizeChatGptExport(data, fileIdentity) {
   const records = Array.isArray(data) ? data : data?.conversations;
   if (!Array.isArray(records)) return [];
-  return records.map((record, recordIndex) => {
-    const nodes = record?.mapping ? Object.values(record.mapping) : [];
-    const rawMessages = nodes.length ? nodes.map((node) => node?.message).filter(Boolean) : (record?.messages || []);
-    const messages = rawMessages.map(normalizeImportMessage).filter(Boolean).sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
-    const id = String(record?.id || record?.conversation_id || recordIndex);
+  const stats = { sourceChats: records.length, alternateBranchNodes: 0, hiddenMessages: 0, toolOrSystemMessages: 0, nonTextMessages: 0, emptyChats: 0 };
+  const conversations = records.map((record, recordIndex) => {
+    const mapping = record?.mapping && typeof record.mapping === "object" ? record.mapping : null;
+    let nodes = mapping ? Object.entries(mapping) : [];
+    if (mapping && nodes.length) {
+      let currentNode = record.current_node;
+      if (!currentNode) {
+        const parentIds = new Set(nodes.map(([, node]) => node?.parent).filter(Boolean));
+        const leaves = nodes.map(([nodeId]) => nodeId).filter((nodeId) => !parentIds.has(nodeId));
+        if (leaves.length !== 1) throw new Error("A ChatGPT chat has alternate reply branches but no active branch marker. No data was uploaded.");
+        currentNode = leaves[0];
+      }
+      if (!mapping[currentNode]) throw new Error("A ChatGPT chat points to a missing active message. No data was uploaded.");
+      const activePath = [];
+      const seen = new Set();
+      let nodeId = currentNode;
+      while (nodeId && mapping[nodeId] && !seen.has(nodeId)) {
+        seen.add(nodeId);
+        activePath.push([nodeId, mapping[nodeId]]);
+        nodeId = mapping[nodeId].parent;
+      }
+      if (nodeId) throw new Error("A ChatGPT chat has a broken message path. No data was uploaded.");
+      stats.alternateBranchNodes += nodes.filter(([id, node]) => !seen.has(id)
+        && node?.message
+        && ["user", "assistant"].includes(importRole(node.message))
+        && !node.message.metadata?.is_visually_hidden_from_conversation).length;
+      nodes = activePath.reverse();
+    }
+    const rawMessages = nodes.length
+      ? nodes.map(([nodeId, node]) => node?.message ? { ...node.message, id: node.message.id || nodeId } : null).filter(Boolean)
+      : (record?.messages || []);
+    const messages = rawMessages.flatMap((message, index) => {
+      if (message?.metadata?.is_visually_hidden_from_conversation) {
+        stats.hiddenMessages += 1;
+        return [];
+      }
+      if ((message?.recipient && message.recipient !== "all") || !["user", "assistant"].includes(importRole(message))) {
+        stats.toolOrSystemMessages += 1;
+        return [];
+      }
+      const normalized = normalizeImportMessage(message, index, fileIdentity);
+      if (!normalized) {
+        stats.nonTextMessages += 1;
+        return [];
+      }
+      return [normalized];
+    });
+    if (!messages.length) stats.emptyChats += 1;
+    const id = String(record?.id || record?.conversation_id || importLocalIdentity(fileIdentity, recordIndex));
     return {
       id,
       title: String(record?.title || "Imported ChatGPT conversation").slice(0, 1000),
@@ -1201,19 +1593,27 @@ function normalizeChatGptExport(data) {
       messages
     };
   }).filter((record) => record.messages.length);
+  conversations.stats = stats;
+  return conversations;
 }
 
-function normalizeGeminiExport(data) {
+function normalizeGeminiExport(data, fileIdentity) {
   const records = Array.isArray(data) ? data : data?.conversations || data?.chats || data?.activity || [];
   if (!Array.isArray(records)) return [];
   return records.map((record, recordIndex) => {
     const rawMessages = record?.messages || record?.turns || record?.chat_messages || record?.events;
-    const fallbackText = importMessageText(record?.details || record?.description || record?.title);
+    const fallbackText = importMessageText(record?.details || record?.description || record?.title) || "";
     const messages = Array.isArray(rawMessages)
-      ? rawMessages.map(normalizeImportMessage).filter(Boolean)
-      : (fallbackText ? [{ id: String(recordIndex), role: "user", text: fallbackText, timestamp: importTimestamp(record?.time || record?.timestamp), attachments: [] }] : []);
+      ? rawMessages.filter((message) => !message?.metadata?.is_visually_hidden_from_conversation
+        && (!message?.recipient || message.recipient === "all")
+        && ["user", "assistant"].includes(importRole(message)))
+        .map((message, index) => normalizeImportMessage(message, index, fileIdentity)).filter(Boolean)
+      : (fallbackText.trim() ? [{ id: importLocalIdentity(fileIdentity, recordIndex), role: "unknown", text: fallbackText, timestamp: importTimestamp(record?.time ?? record?.timestamp), attachments: [] }] : []);
+    if (messages.some((message) => message.text.length > 240_000)) {
+      throw new Error("A Gemini activity entry is longer than Sherry can store. No data was uploaded; the entry was not shortened silently.");
+    }
     return {
-      id: String(record?.id || record?.conversation_id || recordIndex),
+      id: String(record?.id || record?.conversation_id || importLocalIdentity(fileIdentity, recordIndex)),
       title: String(record?.name || record?.header || record?.title || "Imported Gemini activity").slice(0, 1000),
       sourceUrl: null,
       messages
@@ -1221,7 +1621,7 @@ function normalizeGeminiExport(data) {
   }).filter((record) => record.messages.length);
 }
 
-function normalizeGeminiHtml(text) {
+function normalizeGeminiHtml(text, fileIdentity) {
   const documentValue = new DOMParser().parseFromString(text, "text/html");
   const cells = [...documentValue.querySelectorAll(".outer-cell")];
   const records = cells.length ? cells : [documentValue.body];
@@ -1229,12 +1629,15 @@ function normalizeGeminiHtml(text) {
     const copy = cell.cloneNode(true);
     copy.querySelectorAll("style, script").forEach((item) => item.remove());
     const content = copy.textContent.replace(/\s+/g, " ").trim();
+    if (content.length > 240_000) {
+      throw new Error("A Gemini activity entry is longer than Sherry can store. No data was uploaded; the entry was not shortened silently.");
+    }
     const timestamp = importTimestamp(cell.querySelector("time")?.getAttribute("datetime") || cell.querySelector("time")?.textContent);
     return {
-      id: `gemini-takeout-${index}`,
+      id: importLocalIdentity(fileIdentity, index),
       title: content.slice(0, 80) || `Gemini activity ${index + 1}`,
       sourceUrl: null,
-      messages: content ? [{ id: String(index), role: "user", text: content.slice(0, 240_000), timestamp, attachments: [] }] : []
+      messages: content ? [{ id: importLocalIdentity(fileIdentity, index), role: "unknown", text: content, timestamp, attachments: [] }] : []
     };
   }).filter((record) => record.messages.length);
 }
@@ -1279,8 +1682,10 @@ async function importedCaptureEvents(provider, conversation) {
 }
 
 async function previewClaudeImport(file) {
+  const { redactText } = await import("./text-redaction.js");
   const data = JSON.parse(await file.text());
   const normalized = SherryClaudeImport.normalize(data);
+  SherryImportIntegrity.verifyImportPlan(normalized.conversations);
   if (!normalized.conversations.length) throw new Error("No Claude conversations with visible chat text were found.");
   const existingResponse = await api(`/v1/conversations?workspaceId=${workspace.id}`);
   const existing = existingResponse.conversations || [];
@@ -1311,7 +1716,7 @@ async function previewClaudeImport(file) {
     const detail = (await api(`/v1/conversations/${matches[0].id}?workspaceId=${workspace.id}`)).conversation;
     const messages = [];
     for (const message of conversation.messages) {
-      const result = SherryClaudeImport.classifyMessage(message, detail.events || []);
+      const result = SherryClaudeImport.classifyMessage(message, detail.events || [], redactText);
       if (result === "new") {
         messages.push(message);
         counts.newMessages += 1;
@@ -1350,7 +1755,7 @@ async function uploadImportedConversation(provider, conversation, importSessionI
       batch = { ...batchBase, events: events.slice(offset, end) };
     }
     const receipt = await api("/v1/capture/batches", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": batchId }, body: JSON.stringify(batch) });
-    uploaded += SherryImportIntegrity.verifyReceipt(receipt, batch.events.length);
+    uploaded += SherryImportIntegrity.verifyReceipt(receipt, batch.events.length, batch.batchId);
     offset = end;
   }
   return uploaded;
@@ -1379,11 +1784,16 @@ async function importProviderHistory(event) {
       return;
     }
     let imported;
+    const { redactText } = await import("./text-redaction.js");
     if (provider === "claude") imported = pendingClaudeImport.importable;
-    else if (provider === "gemini" && /\.html?$/i.test(file.name)) imported = normalizeGeminiHtml(await file.text());
     else {
-      const data = JSON.parse(await file.text());
-      imported = provider === "chatgpt" ? normalizeChatGptExport(data) : normalizeGeminiExport(data);
+      const sourceText = await file.text();
+      const fileIdentity = await sha256Text(sourceText);
+      if (provider === "gemini" && /\.html?$/i.test(file.name)) imported = normalizeGeminiHtml(sourceText, fileIdentity);
+      else {
+        const data = JSON.parse(sourceText);
+        imported = provider === "chatgpt" ? normalizeChatGptExport(data, fileIdentity) : normalizeGeminiExport(data, fileIdentity);
+      }
     }
     if (!imported.length) throw new Error("No supported conversations were found in this file.");
     SherryImportIntegrity.verifyImportPlan(imported);
@@ -1408,23 +1818,30 @@ async function importProviderHistory(event) {
       if (identityRecord.conversation?.provider_conversation_id !== importedChat.id) {
         throw new Error("Sherry found a different chat during cloud readback.");
       }
-      readBackCount += SherryImportIntegrity.verifyReadback(importedChat.messages, identityRecord.events);
+      readBackCount += SherryImportIntegrity.verifyReadback(importedChat.messages, identityRecord.events, {
+        verificationVersion: identityRecord.verificationVersion, redactText
+      });
     }
     if (readBackCount !== messageCount) throw new Error("The imported message count did not match Sherry's cloud readback.");
     dashboardData = dashboardResponse;
     render();
-    prepareExport();
     const sourceLimit = provider === "gemini"
-      ? "Gemini activity exports may omit AI replies."
+      ? "Gemini activity exports may omit AI replies; entries without a source speaker remain Unknown."
       : "Provider exports may omit non-text content.";
-    $("historyImportStatus").textContent = `Sherry confirmed ${messageCount} visible message${messageCount === 1 ? "" : "s"} from ${imported.length} chat${imported.length === 1 ? "" : "s"} in this file. This checks delivery from the file, not whether the provider export contains every original message. ${sourceLimit} Attachment files were not uploaded.`;
+    const exclusions = provider === "chatgpt" && imported.stats
+      ? ` The file had ${imported.stats.sourceChats} chats; ${imported.stats.emptyChats} had no visible text. Sherry excluded ${imported.stats.hiddenMessages} hidden messages, ${imported.stats.toolOrSystemMessages} system or tool messages, ${imported.stats.nonTextMessages} non-text messages, and ${imported.stats.alternateBranchNodes} visible messages on alternate reply paths.`
+      : "";
+    $("historyImportStatus").textContent = `Sherry confirmed the stored text, speakers, source dates and order for ${messageCount} visible message${messageCount === 1 ? "" : "s"} from ${imported.length} chat${imported.length === 1 ? "" : "s"} in this file.${exclusions} This checks delivery from the file, not whether the provider export contains every original message. ${sourceLimit} Attachment files were not uploaded. Records without source IDs are recognized within this exact file; another export may retain separate copies.`;
     $("historyImportFile").value = "";
     pendingClaudeImport = null;
     button.textContent = provider === "claude" ? "Preview Claude import" : "Import chats";
   } catch (error) {
-    $("historyImportStatus").textContent = uploadStarted
-      ? `Import stopped: ${error.message} Some messages may already be in Sherry. Retrying the same file checks duplicates before adding new messages.`
-      : `Import could not start: ${error.message}`;
+    const deletedChatWasBlocked = /message\(s\) belong to a deleted conversation and were not imported/.test(error.message);
+    $("historyImportStatus").textContent = deletedChatWasBlocked
+      ? `Sherry kept the deleted chat out. ${error.message} If this file contains other chats, they may already have been imported.`
+      : uploadStarted
+        ? `Import stopped: ${error.message} Some messages may already be in Sherry. Retrying the same file checks duplicates before adding new messages.`
+        : `Import could not start: ${error.message}`;
   } finally {
     button.disabled = provider === "claude" && pendingClaudeImport?.counts.newMessages === 0;
   }
@@ -1445,15 +1862,22 @@ function updateHistoryImportProvider() {
 
 async function prepareExport() {
   exportPayload = null;
+  const status = typeof document === "undefined" ? null : document.getElementById("settingsExportStatus");
+  if (status) status.textContent = "Preparing your Sherry export…";
   try {
     if (isPreview) {
       exportPayload = { exportedAt: new Date().toISOString(), workspace: workspace.name, conversations, summaries, personalMemory: { entries: personalMemoryEntries, categories: personalMemoryCustomCategories } };
-      return;
+      return exportPayload;
     }
-    const [full, summaryResponse, noteResponse] = await Promise.all([
-      Promise.all(conversations.map(async (conversation) =>
+    const full = [];
+    for (let offset = 0; offset < conversations.length; offset += 6) {
+      const page = conversations.slice(offset, offset + 6);
+      full.push(...await Promise.all(page.map(async (conversation) =>
         (await api(`/v1/conversations/${conversation.id}?workspaceId=${workspace.id}`)).conversation
-      )),
+      )));
+      if (status) status.textContent = `Preparing your Sherry export: ${full.length} of ${conversations.length} chats…`;
+    }
+    const [summaryResponse, noteResponse] = await Promise.all([
       api(`/v1/summaries?workspaceId=${workspace.id}`),
       api(`/v1/personal-memory?workspaceId=${workspace.id}`)
     ]);
@@ -1464,9 +1888,12 @@ async function prepareExport() {
       summaries: summaryResponse.summaries || [],
       personalMemory: { entries: noteResponse.entries || [], categories: noteResponse.categories || [] }
     };
+    return exportPayload;
   } catch (error) {
     exportPayload = null;
     console.warn("Workspace export could not be prepared", error);
+    if (status) status.textContent = "Sherry could not prepare a complete export. No partial file was downloaded. Try again.";
+    return null;
   }
 }
 
@@ -1491,6 +1918,7 @@ function bootPreview() {
   $("app").classList.remove("hidden");
   $("signOut").classList.add("hidden");
   $("primaryNav").classList.remove("hidden");
+  $("settingsDelete").disabled = true;
   showView(initialViewFromHash());
   render();
   renderMemory();
@@ -1498,7 +1926,6 @@ function bootPreview() {
   renderSettings(summarizerSettings);
   renderRetrievalConnections(retrievalConnections);
   renderSensitivitySettings(sensitivitySettings);
-  prepareExport();
   loadDiagnostics();
 }
 
@@ -1547,7 +1974,6 @@ async function boot(allowRefresh = true) {
     renderMemory();
     renderPersonalMemoryCategories();
     renderSystemAlerts({ alerts: [] });
-    prepareExport();
     loadDiagnostics();
   } catch(error) {
     if (error.status === 401 && allowRefresh && await refreshSession()) return boot(false);
@@ -2810,25 +3236,30 @@ function renderTranscriptMessages(sourceEventId) {
     $("transcriptSort").value
   );
   $("messages").replaceChildren(...events.map((event) => {
-    const message = document.createElement("div");
+    const message = document.createElement("article");
     message.className = `message ${event.role}`;
     if (event.id != null) message.dataset.eventId = String(event.id);
     if (highlightedId != null && String(event.id) === String(highlightedId)) message.classList.add("message-source-target");
     const role = document.createElement("span");
     role.className = "role";
-    role.textContent = `${event.role} · ${event.message_timestamp ? "Sent" : "Captured"} ${formatDateTime(messageTime(event))}`;
+    role.textContent = globalThis.SherryCapturePresentation.speakerLabel(event.role, providerLabel(selected.provider));
+    const time = document.createElement("span");
+    time.className = "message-time";
+    time.textContent = `${observationLabel(event)} ${formatDateTime(messageTime(event))}`;
     const copy = document.createElement("p");
     copy.textContent = event.text_content;
-    message.append(role, copy);
+    message.append(role, copy, time);
     return message;
   }));
 }
 
 async function openConversation(id, options = {}) {
+  if (markChatSeen(id)) render();
   const data = isPreview ? { conversation: conversations.find((item) => item.id === id) } : await api(`/v1/conversations/${id}?workspaceId=${workspace.id}`);
   selected = data.conversation;
   if (!selected) return;
   $("detailProvider").replaceChildren(providerIcon(selected.provider));
+  $("detailSources").replaceChildren(captureSourceBadges({ ...conversations.find((item) => item.id === id), ...selected }));
   $("detailTitle").textContent = selected.title;
   $("detailUpdatedAt").textContent = conversationActivityLabel(selected);
   setOriginalChatLink($("sourceLink"), selected.canonical_chat_url);
@@ -2894,6 +3325,32 @@ $("conflictSort").onchange=()=>{ conflictFilters.sort=$("conflictSort").value; c
 $("conflictPrevious").onclick=()=>{ conflictFilters.page=Math.max(1, conflictFilters.page-1); renderMemory(); $("conflictSection").scrollIntoView({ behavior:"smooth", block:"start" }); };
 $("conflictNext").onclick=()=>{ conflictFilters.page+=1; renderMemory(); $("conflictSection").scrollIntoView({ behavior:"smooth", block:"start" }); };
 $("conversationSearch").oninput=updateConversationFilters;
+$("chatSort").onchange=()=>{ chatSort=$("chatSort").value; localStorage.setItem("sherry_chat_sort", chatSort); render(); };
+$("chatGridView").onclick=()=>{ chatView="grid"; localStorage.setItem("sherry_chat_view", chatView); render(); };
+$("chatTableView").onclick=()=>{ chatView="table"; localStorage.setItem("sherry_chat_view", chatView); render(); };
+$("refreshChatMemory").onclick=refreshChatMemory;
+document.addEventListener("visibilitychange", () => { if (!document.hidden && workspace) render(); });
+$("selectVisibleChats").onclick=()=>{ for(const chat of filteredConversations()) selectedChatIds.add(chat.id); render(); };
+$("clearSelectedChats").onclick=()=>{ selectedChatIds.clear(); render(); };
+$("deleteSelectedChats").onclick=()=>openBulkDeleteDialog([...selectedChatIds], false);
+$("settingsDeleteChats").onclick=async()=>{
+  if(isPreview || deletingChats || !workspace?.id) return;
+  $("settingsDeleteChats").disabled=true;
+  $("settingsDeleteChatsStatus").textContent="Checking stored chats…";
+  try {
+    const result=await api(`/v1/conversations?workspaceId=${workspace.id}`, {cache:"no-store"});
+    if(!Array.isArray(result.conversations)) throw new Error("The chat list was not returned.");
+    conversations=result.conversations;
+    render();
+    if(!conversations.length){ $("settingsDeleteChatsStatus").textContent="There are no chats to delete."; return; }
+    $("settingsDeleteChatsStatus").textContent="";
+    openBulkDeleteDialog(conversations.map((chat)=>chat.id), true);
+  }catch(error){ $("settingsDeleteChatsStatus").textContent=`Could not check chats: ${error.message}`; }
+  finally{ render(); }
+};
+$("cancelBulkDelete").onclick=()=>{ bulkDeleteTarget=null; $("bulkDeleteDialog").close(); };
+$("bulkDeleteConfirmation").oninput=()=>{ $("confirmBulkDelete").disabled=$("bulkDeleteConfirmation").value!=="DELETE ALL CHATS"; };
+$("confirmBulkDelete").onclick=deleteChatBatch;
 ["providerFilter","deviceFilter","dateFilter","artifactFilter"].forEach((id)=>$(id).onchange=updateConversationFilters);
 $("dateFrom").onchange=updateConversationFilters;
 $("dateTo").onchange=updateConversationFilters;
@@ -2951,14 +3408,63 @@ $("confirmDelete").onclick=async()=>{
   $("deleteDialog").close();
   $("detailDialog").close();
   render();
-  prepareExport();
   if(result?.deleted?.cleanupPending){
     bootDataAlerts.push({severity:"warning",title:"Chat deleted; archive cleanup pending",message:"The chat is no longer available in Sherry. A background retry is finishing raw archive cleanup.",action:"Check Diagnostics again in a few minutes."});
     renderSystemAlerts({alerts:[]});
   }
   $("confirmDelete").disabled=false;
 };
-$("settingsExport").onclick=(event)=>{event.preventDefault(); if(exportPayload) download("memory-export.json", exportPayload);};
+$("settingsDelete").onclick=()=>{
+  if (isPreview) return;
+  $("accountDeleteConfirmation").value="";
+  $("accountDeleteStatus").textContent="";
+  $("confirmAccountDelete").disabled=true;
+  $("accountDeleteDialog").showModal();
+};
+$("cancelAccountDelete").onclick=()=>$("accountDeleteDialog").close();
+$("accountDeleteConfirmation").oninput=()=>{
+  $("confirmAccountDelete").disabled=$("accountDeleteConfirmation").value !== "DELETE MY SHERRY ACCOUNT";
+};
+$("confirmAccountDelete").onclick=async()=>{
+  if (!workspace?.id || $("accountDeleteConfirmation").value !== "DELETE MY SHERRY ACCOUNT") return;
+  $("confirmAccountDelete").disabled=true;
+  $("cancelAccountDelete").disabled=true;
+  $("accountDeleteStatus").textContent="Starting permanent deletion…";
+  try {
+    await api(`/v1/account?workspaceId=${workspace.id}`,{
+      method:"DELETE",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({confirmation:"DELETE MY SHERRY ACCOUNT"})
+    });
+    const extensionDisconnected=await extensionMessage({type:"CLEAR_INGESTION_CONFIG"}).then((response)=>response?.ok===true).catch(()=>false);
+    localStorage.removeItem("memory_session");
+    session=null;
+    workspace=null;
+    $("accountDeleteDialog").close();
+    showAuth();
+    $("authError").textContent=extensionDisconnected
+      ? "Sherry accepted your deletion request. Your stored data is being removed and this account is closing."
+      : "Sherry accepted your deletion request. Your stored data is being removed. Disconnect Sherry Capture in the browser extension if it is installed.";
+  }catch(error){
+    $("accountDeleteStatus").textContent=`Deletion could not start: ${error.message}`;
+    $("confirmAccountDelete").disabled=false;
+    $("cancelAccountDelete").disabled=false;
+  }
+};
+$("settingsExport").onclick=async(event)=>{
+  event.preventDefault();
+  if (exportBusy) return;
+  exportBusy = true;
+  try {
+    const payload = await prepareExport();
+    if (payload) {
+      download("memory-export.json", payload);
+      $("settingsExportStatus").textContent = "Your Sherry export download has started.";
+    }
+  } finally {
+    exportBusy = false;
+  }
+};
 $("historyImportForm").onsubmit=importProviderHistory;
 $("historyImportProvider").onchange=updateHistoryImportProvider;
 $("historyImportFile").onchange=()=>{ pendingClaudeImport=null; $("historyImportButton").textContent=$("historyImportProvider").value==="claude"?"Preview Claude import":"Import chats"; $("historyImportButton").disabled=false; $("historyImportStatus").textContent=""; };
@@ -2970,5 +3476,13 @@ document.addEventListener("sherry-capture-ready", () => {
 });
 setSidebarCollapsed(localStorage.getItem("sherry_sidebar_collapsed") === "true");
 renderPersonalMemoryCategories();
-boot();
+if (!globalThis.SherryRecoveryRouting) boot();
+window.addEventListener("storage", (event) => {
+  if (event.key !== "memory_session" || isPreview) return;
+  const latest = authClient.readSession();
+  if (latest?.access_token === session?.access_token) return;
+  session = latest;
+  if (session) void boot();
+  else showAuth();
+});
 setInterval(() => { if (workspace && session?.access_token) loadDiagnostics(); }, 60_000);

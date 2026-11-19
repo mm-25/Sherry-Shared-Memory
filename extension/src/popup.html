@@ -8,40 +8,65 @@
   </head>
   <body>
     <main>
-      <header>
-        <span id="extension-version" class="eyebrow">SHERRY CAPTURE</span>
-        <h1>Sherry Capture</h1>
+      <header class="popup-header">
+        <div class="brand-row">
+          <span class="brand">Sherry</span>
+          <span id="extension-version" class="version">Capture</span>
+        </div>
+        <h1>Capture status</h1>
         <p id="page-status">Checking this tab…</p>
       </header>
 
-      <section class="control-row">
+      <section class="capture-control" aria-label="Capture setting">
         <div>
-          <strong>Automatic capture</strong>
-          <span>Visible ChatGPT, Claude, and Gemini messages</span>
+          <strong>Capture new messages</strong>
+          <p id="capture-setting-description">On supported ChatGPT, Claude, and Gemini chats</p>
         </div>
         <label class="switch">
-          <input id="capture-enabled" type="checkbox" />
+          <input id="capture-enabled" type="checkbox" aria-label="Capture new messages automatically" />
           <span aria-hidden="true"></span>
         </label>
       </section>
 
-      <section class="stats" aria-label="Capture statistics">
-        <div><span>Stored locally · all tools</span><strong id="event-count">0</strong></div>
-        <div><span>Last capture</span><strong id="last-capture">Never</strong></div>
+      <section id="site-access-panel" class="attention-panel" hidden>
+        <h2>Allow automatic capture on this site</h2>
+        <p id="site-access-description">Sherry needs ongoing access to this site to capture while the popup is closed.</p>
+        <button id="grant-site-access" class="primary" type="button">Allow this site</button>
       </section>
 
-      <p id="sync-status" class="sync-status" role="status">Checking cloud sync…</p>
-      <p id="scan-status" class="sync-status" role="status">Checking this page’s scan…</p>
+      <section id="attention-panel" class="attention-panel" aria-labelledby="attention-title" hidden>
+        <h2 id="attention-title">Earlier uploads need attention</h2>
+        <p id="sync-alert" role="alert" hidden></p>
+        <button id="repair-chat" class="primary" type="button" hidden disabled>Retry this chat’s saved messages</button>
+        <p id="repair-explainer" class="fine-print" hidden>This retries only this chat’s local copies. Check the Sherry transcript afterward; other failed uploads may still need review.</p>
+      </section>
 
-      <p id="sync-alert" class="error" hidden></p>
+      <section class="coverage-card" aria-labelledby="coverage-title">
+        <h2 id="coverage-title">This conversation</h2>
+        <p id="scan-status" role="status">Checking what is loaded on this page…</p>
+        <p id="repair-count" hidden></p>
+        <p id="coverage-note" class="fine-print">Page and device counts describe different steps. Neither alone confirms that the full chat reached Sherry.</p>
+      </section>
 
-      <p id="error" class="error" hidden></p>
+      <p id="sync-status" class="cloud-status" role="status">Checking cloud upload…</p>
+      <p id="repair-status" class="action-status" role="status" hidden></p>
+      <p id="error" class="error" role="alert" hidden></p>
 
       <div class="actions">
-        <button id="capture-now" type="button">Capture visible messages</button>
-        <button id="connect-sherry" class="secondary" type="button">Reconnect Sherry page</button>
-        <button id="open-diagnostics" class="secondary" type="button">Open diagnostics</button>
+        <button id="capture-now" class="secondary" type="button">Capture messages on this page</button>
+        <button id="connect-sherry" class="secondary" type="button" hidden>Reconnect Sherry page</button>
       </div>
+
+      <details class="details">
+        <summary>Activity and troubleshooting</summary>
+        <dl>
+          <div><dt>Saved on this device · all chats</dt><dd id="event-count">0</dd></div>
+          <div><dt>Last local capture</dt><dd id="last-capture">Never</dd></div>
+        </dl>
+        <button id="save-capture-report" class="quiet" type="button" hidden>Save troubleshooting report</button>
+        <p id="report-description" class="fine-print" hidden>Includes message counts, text lengths and site access. No chat text or sign-in details.</p>
+      </details>
+      <button id="open-diagnostics" class="quiet" type="button">Open Sherry diagnostics</button>
     </main>
     <script src="popup.js"></script>
   </body>

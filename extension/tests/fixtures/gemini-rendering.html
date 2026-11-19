@@ -1,0 +1,80 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sherry Gemini loaded-message regression</title>
+<style>
+body { font: 16px system-ui; margin: 30px; }
+.fixture { position: absolute; top: 30000px; content-visibility: auto; contain-intrinsic-size: auto 400px; width: 600px; }
+user-query, model-response { display: block; }
+.hidden { display: none; }
+pre { white-space: pre-wrap; }
+</style>
+<h1>Gemini loaded-message regression</h1>
+<p>Local invented content only. Tests the packaged reader against real browser text/layout APIs. No network uploads.</p>
+<pre id="results">Running…</pre>
+<div class="fixture" id="fixture" style="content-visibility: auto !important; color: rgb(0, 0, 0)">
+  <user-query><div class="query-text"><p>Invented first prompt.</p><p>Keep this second paragraph.</p><span class="hidden">HIDDEN SENTINEL</span></div><button>OUTSIDE CONTROL</button></user-query>
+  <model-response><div class="model-response-text"><p>Invented first reply.</p><p>Code follows:</p><pre>line one\nline two</pre><span class="hidden">HIDDEN SENTINEL</span></div><button>OUTSIDE CONTROL</button></model-response>
+</div>
+<script src="../../src/core.js"></script>
+<script>let captureConfig; window.SharedMemoryWebProviderAdapter = {start(config) { captureConfig = config; }};</script>
+<script src="../../src/gemini-adapter.js"></script>
+<script>
+(async () => {
+  // Give content-visibility:auto time to skip the off-screen fixture.
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const fixture = document.querySelector('#fixture');
+  const turns = [...fixture.querySelectorAll('user-query,model-response')];
+  const read = turn => captureConfig.extractText(captureConfig.findMessageNode(turn, captureConfig.detectRole(turn)) || turn, turn);
+  const styles = () => JSON.stringify([...fixture.style].sort().map(name => [name, fixture.style.getPropertyValue(name), fixture.style.getPropertyPriority(name)]));
+  const styleBefore = fixture.getAttribute('style');
+  const propertiesBefore = styles();
+  const scrollBefore = scrollY;
+  const before = turns.map(turn => captureConfig.findMessageNode(turn, captureConfig.detectRole(turn)).innerText);
+  const actualOffscreen = turns.map(read);
+  const propertiesAfter = styles();
+  fixture.style.setProperty('content-visibility', 'visible', 'important');
+  const rendered = turns.map(read);
+  fixture.setAttribute('style', styleBefore);
+  // Chromium may eagerly read off-screen innerText. Model Firefox's observed
+  // empty getter while retaining actual DOM, CSS restoration and rendered reads.
+  for (const turn of turns) {
+    const body = captureConfig.findMessageNode(turn, captureConfig.detectRole(turn));
+    const getter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerText').get;
+    Object.defineProperty(body, 'innerText', { configurable: true, get() { return getComputedStyle(fixture).contentVisibility === 'auto' ? '' : getter.call(this); } });
+  }
+  const reportCondition = turns.map(read);
+  const restoredAfterReport = styles() === propertiesBefore;
+  for (const turn of turns) delete captureConfig.findMessageNode(turn, captureConfig.detectRole(turn)).innerText;
+  // Model a page where the rendered getter remains blank even after the
+  // content-visibility override; the safe loaded-body reader must recover.
+  for (const turn of turns) {
+    const body = captureConfig.findMessageNode(turn, captureConfig.detectRole(turn));
+    Object.defineProperty(body, 'innerText', { configurable: true, get() { return ''; } });
+  }
+  const loadedFallback = turns.map(read);
+  const restoredAfterFallback = styles() === propertiesBefore;
+  for (const turn of turns) delete captureConfig.findMessageNode(turn, captureConfig.detectRole(turn)).innerText;
+  const hiddenBody = turns[0].querySelector('.query-text');
+  hiddenBody.hidden = true;
+  const hiddenResult = read(turns[0]);
+  hiddenBody.hidden = false;
+  const checks = {
+    offscreenMatchesVisible: JSON.stringify(actualOffscreen) === JSON.stringify(rendered),
+    reportConditionMatchesVisible: JSON.stringify(reportCondition) === JSON.stringify(rendered),
+    loadedFallbackReadsMessages: loadedFallback.every(Boolean),
+    loadedFallbackExcludesControls: !loadedFallback.join('').includes('HIDDEN SENTINEL') && !loadedFallback.join('').includes('OUTSIDE CONTROL'),
+    allMessagesRead: actualOffscreen.every(Boolean) && reportCondition.every(Boolean),
+    paragraphsPreserved: reportCondition[0].includes('\n\n'),
+    hiddenTextExcluded: !reportCondition.join('').includes('HIDDEN SENTINEL'),
+    outsideControlsExcluded: !reportCondition.join('').includes('OUTSIDE CONTROL'),
+    explicitlyHiddenMessageSkipped: hiddenResult === '',
+    stylesRestored: propertiesBefore === propertiesAfter && restoredAfterReport && restoredAfterFallback,
+    scrollUnchanged: scrollY === scrollBefore
+  };
+  document.querySelector('#results').textContent = JSON.stringify({
+    status: Object.values(checks).every(Boolean) ? 'PASS' : 'FAIL',
+    nativeEmptyOffscreenBodies: before.filter(text => !text).length,
+    checks
+  }, null, 2);
+})().catch(error => { document.querySelector('#results').textContent = 'ERROR: ' + error.message; });
+</script>

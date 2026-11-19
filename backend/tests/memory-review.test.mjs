@@ -65,6 +65,24 @@ test("summary listing includes imported chats beyond the first page", async () =
   assert.deepEqual(offsets, [0, 100]);
 });
 
+test("summary listing does not stop after five full pages", async () => {
+  const checkpoints = Array.from({ length: 501 }, (_, index) => ({ id: `checkpoint-${index}`, conversation_id: `chat-${index}`, status: "active" }));
+  const offsets = [];
+  const fetch = async (input) => {
+    const url = new URL(input);
+    if (url.pathname.endsWith("/checkpoints")) {
+      const offset = Number(url.searchParams.get("offset"));
+      offsets.push(offset);
+      return Response.json(checkpoints.slice(offset, offset + 100));
+    }
+    if (url.pathname.endsWith("/conversations")) return Response.json([]);
+    throw new Error(`Unexpected request: ${url.pathname}`);
+  };
+  const summaries = await listSummaries(WORKSPACE_ID, configuredEnv(new MemoryR2()), fetch);
+  assert.equal(summaries.length, 501);
+  assert.deepEqual(offsets, [0, 100, 200, 300, 400, 500]);
+});
+
 test("obvious elaborations are separated without changing saved claims or conflicts", async () => {
   const earlier = { id: "a", conversation_id: "chat-a", display_text: "User prefers short replies for project updates", status: "confirmed", observed_at: "2026-09-01T00:00:00Z" };
   const newer = { id: "b", conversation_id: "chat-b", display_text: "User prefers short replies for project updates with clear next steps", status: "provisional", observed_at: "2026-09-02T00:00:00Z" };

@@ -57,7 +57,7 @@ async function fetchRowsByIds(table, column, ids, select, workspaceId, env, fetc
 export async function listSummaries(workspaceId, env, fetchImpl = globalThis.fetch) {
   const checkpoints = [];
   const pageSize = 100;
-  for (let offset = 0; offset < 500; offset += pageSize) {
+  for (let offset = 0; ; offset += pageSize) {
     const page = await supabaseJson(
       `checkpoints?workspace_id=eq.${encodeURIComponent(workspaceId)}&status=in.(active,user_edited)&select=id,conversation_id,version,summary_text,topics,open_threads,key_decisions,status,source_availability,provider,model,model_version,input_tokens,output_tokens,cached_input_tokens,total_tokens,estimated_cost_usd,exact_cost_usd,created_at,edited_at&order=created_at.desc,id.desc&limit=${pageSize}&offset=${offset}`,
       env,

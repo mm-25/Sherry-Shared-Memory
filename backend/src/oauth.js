@@ -4,10 +4,12 @@ function esc(value) { return String(value || "").replace(/[&<>"']/g, (c) => ({ "
 function cookie(request, name) {
   return (request.headers.get("cookie") || "").split(";").map((v) => v.trim()).find((v) => v.startsWith(`${name}=`))?.slice(name.length + 1) || null;
 }
-function securityHeaders(csrf) {
+function securityHeaders(csrf, supabaseUrl) {
+  const authUrl = new URL(supabaseUrl);
+  if (authUrl.protocol !== "https:") throw new Error("Consent renewal requires an HTTPS authentication service.");
   return {
     "content-type": "text/html; charset=utf-8", "x-frame-options": "DENY", "x-content-type-options": "nosniff",
-    "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    "content-security-policy": `default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self' ${authUrl.origin}; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
     ...(csrf ? { "set-cookie": `__Host-memory_csrf=${csrf}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=600` } : {})
   };
 }
@@ -28,8 +30,8 @@ function inferProvider(name) {
   for (const provider of ["chatgpt", "claude", "gemini", "grok"]) if (value.includes(provider)) return provider;
   return "generic";
 }
-function consentPage(query, clientName, scopes, csrf) {
-  return new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Connect to Memory</title></head><body style="font:16px system-ui;max-width:560px;margin:10vh auto;padding:24px;color:#171717"><main><p style="color:#666">Shared Memory connector</p><h1>Allow ${esc(clientName)} to use your memory?</h1><p>It is requesting: <strong>${esc(scopes.join(", ") || "memory:read")}</strong>.</p><p>Search results include only a small, source-linked context packet. The AI cannot browse your entire database.</p><p id="state">Checking your Memory sign-in…</p><input id="csrf" type="hidden" value="${esc(csrf)}"><button id="allow" disabled style="padding:12px 18px">Allow connection</button> <a href="/">Cancel</a></main><script src="/oauth-consent.js"></script></body></html>`, { headers: securityHeaders(csrf) });
+function consentPage(query, clientName, scopes, csrf, supabaseUrl) {
+  return new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Connect to Memory</title></head><body style="font:16px system-ui;max-width:560px;margin:10vh auto;padding:24px;color:#171717"><main><p style="color:#666">Shared Memory connector</p><h1>Allow ${esc(clientName)} to use your memory?</h1><p>It is requesting: <strong>${esc(scopes.join(", ") || "memory:read")}</strong>.</p><p>Search results include only a small, source-linked context packet. The AI cannot browse your entire database.</p><p id="state">Checking your Memory sign-in…</p><input id="csrf" type="hidden" value="${esc(csrf)}"><button id="allow" disabled style="padding:12px 18px">Allow connection</button> <a href="/">Cancel</a></main><script src="/oauth-consent.js"></script></body></html>`, { headers: securityHeaders(csrf, supabaseUrl) });
 }
 
 export function createDefaultHandler(appHandler) {
@@ -42,7 +44,7 @@ export function createDefaultHandler(appHandler) {
       if (!client) return new Response("Unknown connector client.", { status: 400 });
       if (request.method === "GET") {
         const csrf = crypto.randomUUID();
-        return consentPage(url.searchParams.toString(), client.clientName || "AI provider", authRequest.scope, csrf);
+        return consentPage(url.searchParams.toString(), client.clientName || "AI provider", authRequest.scope, csrf, env.SUPABASE_URL);
       }
       if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
       const body = await request.json().catch(() => ({}));

@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.Sherry" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+    <string name="capture_service_description">Experimental ChatGPT capture. With separate in-app consent, Sherry can save settled visible ChatGPT messages to an encrypted queue while ChatGPT is open. Manual previews remain available. Configured sync can upload saved messages. Pause or disable access at any time.</string>
+</resources>

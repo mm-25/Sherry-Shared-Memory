@@ -1,0 +1,11 @@
+Sherry Desktop 0.1.4 for macOS (Apple silicon)
+
+1. Quit the existing Sherry Desktop from its menu-bar control before opening this version.
+2. Keep your existing Sherry saved data. Do not uninstall or reset capture to update.
+3. Codex and Antigravity read local conversation records. Accessibility permission is unnecessary for those sources.
+4. Claude desktop capture requires Accessibility access for this app. Use an ordinary chat and the existing Check control if access needs verification. Native ChatGPT capture remains disabled pending source verification.
+5. Closing the window leaves capture available in the menu bar. Quit from that menu to stop the service.
+
+This is a locally signed Apple-silicon development build and is not notarized.
+The bundled runtime is included. Installation does not establish live capture or cloud acceptance.
+For current source coverage and owner testing, see mvp.md and plan.md section 23 in the source repository.

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sherry Desktop</title><link rel="stylesheet" href="style.css"></head>
+<body><main class="shell">
+  <header><div class="brand"><span class="mark">S</span><strong>Sherry</strong><span class="subbrand">Desktop</span></div><span id="service" class="service">Connecting…</span></header>
+  <section id="auth" class="auth hidden"><div class="auth-card"><p class="eyebrow">ONE MEMORY ACROSS YOUR AI TOOLS</p><h1>Connect your desktop</h1><p class="muted">Sign in with the Sherry account you use in the browser extension.</p>
+    <form id="sign-in"><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button id="sign-in-button" class="primary" type="submit">Sign in</button></form></div></section>
+  <section id="dashboard" class="dashboard hidden"><div class="intro"><div><p class="eyebrow">CAPTURE COMPANION</p><h1>Desktop capture</h1><p id="account" class="muted"></p></div><button id="sign-out" class="text-button">Sign out</button></div>
+    <div class="page-tabs" role="tablist" aria-label="Desktop sections">
+      <button id="capture-tab" role="tab" aria-selected="true" aria-controls="capture-panel">Capture</button>
+      <button id="test-tab" role="tab" aria-selected="false" aria-controls="test-panel" tabindex="-1">Test</button>
+    </div>
+    <div id="capture-panel" role="tabpanel" aria-labelledby="capture-tab">
+    <div class="master card"><div><h2 id="master-title">Capture is paused</h2><p>Choose your apps below. New coding sessions start when capture is enabled; visible app conversations may include earlier turns.</p></div><button id="master-toggle" class="primary">Start capture</button></div>
+    <div class="section-title"><span>SOURCES</span><span>Turn each app on or off</span></div>
+    <div id="sources" class="sources"></div>
+    <div class="metrics"><div class="metric"><span class="metric-number" id="pending">0</span><span>Pending encrypted batches</span></div><div class="metric"><span class="metric-number" id="quarantined">0</span><span>Need attention</span></div><div class="metric"><span class="metric-number" id="last-upload">—</span><span>Last upload</span></div></div>
+    <div class="permission"><span>Claude reads the open ordinary chat with Accessibility access. Check the Test tab for its latest reading and upload status. Codex and Antigravity read local logs. For ChatGPT, use the browser extension.</span><div><button id="show-app" class="text-button">Show app in Finder ↗</button><button id="accessibility" class="text-button">Open Accessibility settings ↗</button></div></div>
+    </div>
+    <div id="test-panel" role="tabpanel" aria-labelledby="test-tab" class="hidden">
+      <div id="test-source-tabs" class="source-tabs" role="tablist" aria-label="Test source">
+        <button id="test-codex" role="tab" aria-selected="true" aria-controls="test-source-panel" data-source="codex">Codex</button>
+        <button id="test-antigravity" role="tab" aria-selected="false" aria-controls="test-source-panel" data-source="antigravity" tabindex="-1">Antigravity</button>
+        <button id="test-chatgpt" role="tab" aria-selected="false" aria-controls="test-source-panel" data-source="chatgpt" tabindex="-1">ChatGPT</button>
+        <button id="test-claude" role="tab" aria-selected="false" aria-controls="test-source-panel" data-source="claude" tabindex="-1">Claude</button>
+      </div>
+      <section id="test-source-panel" role="tabpanel" aria-labelledby="test-codex">
+        <div class="test-heading"><div><h2 id="test-title">Codex capture log</h2><p id="test-description" class="muted"></p></div><button id="test-start" class="primary">Start testing</button></div>
+        <div id="test-reader" class="reader-status" role="status"></div>
+        <div id="test-permission" class="permission hidden"><span id="test-permission-message">ChatGPT and Claude use Accessibility to read the visible conversation.</span><div><button id="test-show-app" class="text-button">Show current app in Finder ↗</button><button id="test-accessibility" class="text-button">Open Accessibility settings ↗</button></div></div>
+        <div class="test-totals"><span id="test-count">0 recent turns</span><span id="test-updated">Refreshes every 2 seconds</span></div>
+        <div id="test-log" class="capture-log"></div>
+        <p class="test-footnote">Recent captures stay here after upload. Up to 50 turns or 2 MB per app are kept locally and encrypted. “Uploaded” means the server accepted the batch. This view follows the same capture switches as the Capture tab.</p>
+      </section>
+    </div>
+  </section>
+  <div id="message" role="status" aria-live="polite"></div>
+</main><script src="app.js"></script></body></html>

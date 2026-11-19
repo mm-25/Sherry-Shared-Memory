@@ -35,7 +35,8 @@
     const stats = { rawMessages: 0, textMessages: 0, nonTextMessages: 0, nonTextConversations: 0, attachmentReferences: 0, summaries: 0, invalidIds: 0 };
     const conversations = [];
     for (const record of records) {
-      const id = String(record?.uuid || "").trim();
+      const id = String(record?.uuid || "");
+      if (id !== id.trim()) throw new Error("The export has an unsupported chat identity. No messages were uploaded.");
       if (!id || !Array.isArray(record.chat_messages)) {
         stats.invalidIds += 1;
         continue;
@@ -44,16 +45,20 @@
       if (record.summary) stats.summaries += 1;
       record.chat_messages.forEach((message, sourceIndex) => {
         stats.rawMessages += 1;
-        const messageId = String(message?.uuid || "").trim();
+        const messageId = String(message?.uuid || "");
         const role = message?.sender === "human" ? "user" : message?.sender === "assistant" ? "assistant" : null;
-        const text = (Array.isArray(message?.content) ? message.content : [])
-          .filter((block) => block?.type === "text" && typeof block.text === "string" && block.text.trim())
-          .map((block) => block.text.trim()).join("\n\n").slice(0, 250_000);
         if (!messageId || !role) {
           stats.invalidIds += 1;
           return;
         }
-        if (!text) {
+        if (messageId !== messageId.trim()) throw new Error("The export has an unsupported message identity. No messages were uploaded.");
+        const text = (Array.isArray(message?.content) ? message.content : [])
+          .filter((block) => block?.type === "text" && typeof block.text === "string")
+          .map((block) => block.text).join("\n\n");
+        if (text.length > 240_000) {
+          throw new Error("A Claude export message is longer than Sherry can store. No data was uploaded; the message was not shortened silently.");
+        }
+        if (!text.trim()) {
           stats.nonTextMessages += 1;
           return;
         }
@@ -110,31 +115,33 @@
     return false;
   }
 
-  function classifyMessage(message, existingEvents) {
+  function classifyMessage(message, existingEvents, redactText = (value) => ({ value })) {
     const byId = existingEvents.filter((event) => event.provider_message_id === message.id);
     if (byId.length > 1) return "ambiguous";
     if (byId.length === 1) {
-      return byId[0].role === message.role && compact(byId[0].text_content) === compact(message.text)
+      const sameDate = timestamp(byId[0].message_timestamp) === timestamp(message.timestamp);
+      const sameSequence = message.sequence == null || byId[0].sequence === message.sequence;
+      return byId[0].role === message.role && byId[0].text_content === redactText(message.text).value && sameDate && sameSequence
         ? "duplicate" : "ambiguous";
     }
-    const sameText = existingEvents.filter((event) => event.role === message.role
+    // Another proven provider ID denotes a separate turn, even with identical text.
+    const unidentified = existingEvents.filter((event) => !event.provider_message_id);
+    const sameText = unidentified.filter((event) => event.role === message.role
       && compact(event.text_content) === compact(message.text));
     if (sameText.length === 1) {
-      const sourceTime = Date.parse(message.timestamp || "");
-      const eventTime = Date.parse(sameText[0].message_timestamp || "");
-      return Number.isFinite(sourceTime) && Number.isFinite(eventTime)
-        && Math.abs(sourceTime - eventTime) < 60_000 ? "duplicate" : "ambiguous";
+      // Text/time similarity does not establish that an unidentified live turn is this export turn.
+      return "ambiguous";
     }
     if (sameText.length > 1) return "ambiguous";
     const prefix = compact(message.text).slice(0, 100);
-    const possibleTruncation = prefix.length >= 40 && existingEvents.some((event) => {
+    const possibleTruncation = prefix.length >= 40 && unidentified.some((event) => {
       if (event.role !== message.role) return false;
       const current = compact(event.text_content);
       return current.startsWith(prefix) || (current.length >= 40 && compact(message.text).startsWith(current.slice(0, 100)));
     });
     if (possibleTruncation) return "ambiguous";
     const sourceTime = Date.parse(message.timestamp || "");
-    if (Number.isFinite(sourceTime) && existingEvents.some((event) => {
+    if (Number.isFinite(sourceTime) && unidentified.some((event) => {
       const eventTime = Date.parse(event.message_timestamp || "");
       return event.role === message.role && Number.isFinite(eventTime)
         && Math.abs(eventTime - sourceTime) < 60_000;

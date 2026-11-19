@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check src/index.js && node --check src/conversation-activity.js && node --check src/worker-entry.js && node --check src/validation.js && node --check src/redaction.js && node --check src/checkpoints.js && node --check src/crypto.js && node --check src/settings.js && node --check src/summarizer-gateway.js && node --check src/summarization-cost.js && node --check src/summarization-service.js && node --check src/memory-review.js && node --check src/retrieval.js && node --check src/mcp.js && node --check src/oauth.js",
+    "check": "node --check src/index.js && node --check src/account-deletion.js && node --check src/conversation-activity.js && node --check src/worker-entry.js && node --check src/validation.js && node --check src/redaction.js && node --check src/checkpoints.js && node --check src/crypto.js && node --check src/settings.js && node --check src/summarizer-gateway.js && node --check src/summarization-cost.js && node --check src/summarization-service.js && node --check src/memory-review.js && node --check src/retrieval.js && node --check src/mcp.js && node --check src/oauth.js",
     "test": "node --test tests/*.test.mjs",
     "dev": "wrangler dev",
     "types": "wrangler types",

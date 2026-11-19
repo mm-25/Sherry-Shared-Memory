@@ -1,3 +1,6 @@
+import { validateSourceMetadata } from "./source-metadata.js";
+import { validateCaptureEvidence } from "./capture-evidence.js";
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[a-z0-9:_-]{8,128}$/i;
 const EVENT_ID_PATTERN = /^evt_[a-z0-9:_-]{4,120}$/i;
@@ -8,7 +11,7 @@ const SUPPORTED_ADAPTER_TYPES = new Set(["browser_dom", "structured_hook", "acce
 const SUPPORTED_OPERATING_SYSTEMS = new Set(["macos", "windows", "linux", "android", "chromeos", "ios", "unknown"]);
 const SUPPORTED_COVERAGE_STATES = new Set(["complete_observed_range", "partial", "gap_detected", "awaiting_backfill"]);
 const SUPPORTED_CAPTURE_REASONS = new Set([
-  "mutation", "initial_scan", "manual", "reload_recovery", "opened_chat_backfill",
+  "mutation", "initial_scan", "periodic_scan", "manual", "reload_recovery", "opened_chat_backfill",
   "initial_backfill", "repair_backfill", "hook", "accessibility", "share", "historical_import"
 ]);
 const SUPPORTED_ROLES = new Set(["user", "assistant", "system", "tool", "unknown"]);
@@ -116,22 +119,32 @@ function validateEvent(event, index, capture, errors) {
     pushError(errors, `${path}.attachments`, "must contain at most 25 metadata objects");
   }
 
+  let captureEvidence;
+  try { captureEvidence = validateCaptureEvidence(event.captureEvidence, event, capture); }
+  catch (error) { pushError(errors, `${path}.captureEvidence`, error.message); }
+
+  let sourceMetadata;
+  try { sourceMetadata = validateSourceMetadata(event.sourceMetadata, event, capture); }
+  catch (error) { pushError(errors, `${path}.sourceMetadata`, error.message); }
+
   return {
     eventId: event.eventId,
     provider: capture.product,
-    conversationId: event.conversationId.trim(),
-    providerMessageId: event.providerMessageId?.trim() || null,
+    conversationId: typeof event.conversationId === "string" ? event.conversationId.trim() : "",
+    providerMessageId: typeof event.providerMessageId === "string" ? event.providerMessageId.trim() || null : null,
     sequence: event.sequence,
     role: event.role,
     text: event.text,
     contentHash: event.contentHash,
     sourceUrl: event.sourceUrl || null,
-    sourceLocator: event.sourceLocator?.trim() || null,
-    chatTitle: event.chatTitle.trim(),
+    sourceLocator: typeof event.sourceLocator === "string" ? event.sourceLocator.trim() || null : null,
+    chatTitle: typeof event.chatTitle === "string" ? event.chatTitle.trim() : "",
     messageTimestamp: event.messageTimestamp || null,
     capturedAt: event.capturedAt,
-    links: [...new Set(event.links)],
-    attachments: event.attachments
+    links: Array.isArray(event.links) ? [...new Set(event.links)] : [],
+    attachments: event.attachments,
+    ...(captureEvidence ? { captureEvidence } : {}),
+    ...(sourceMetadata ? { sourceMetadata } : {})
   };
 }
 
@@ -151,7 +164,7 @@ export function validateCaptureBatch(payload) {
   if (!isIsoTimestamp(payload.clientCreatedAt)) {
     pushError(errors, "clientCreatedAt", "must be an ISO timestamp");
   }
-  if (!Array.isArray(payload.events) || payload.events.length < 1 || payload.events.length > 100) {
+  if (!Array.isArray(payload.events) || (payload.events.length < 1 && !(payload.schemaVersion === 2 && Array.isArray(payload.conversationUpdates) && payload.conversationUpdates.length > 0)) || payload.events.length > 100) {
     pushError(errors, "events", "must contain between 1 and 100 events");
   }
 
@@ -209,6 +222,23 @@ export function validateCaptureBatch(payload) {
     ? payload.events.slice(0, 100).map((event, index) => validateEvent(event, index, capture, errors)).filter(Boolean)
     : [];
 
+  let conversationUpdates;
+  if (payload.conversationUpdates !== undefined) {
+    if (schemaVersion !== 2 || !Array.isArray(payload.conversationUpdates) || payload.conversationUpdates.length < 1 || payload.conversationUpdates.length > 100) {
+      pushError(errors, "conversationUpdates", "must contain between 1 and 100 title updates on schema-v2");
+    } else conversationUpdates = payload.conversationUpdates.map((update, index) => {
+      const path = `conversationUpdates[${index}]`;
+      if (!isObject(update)) { pushError(errors, path, "must be an object"); return null; }
+      if (Object.keys(update).some(key => !["conversationId", "chatTitle", "capturedAt", "sourceMetadata"].includes(key))) pushError(errors, path, "contains unsupported fields");
+      if (typeof update.conversationId !== "string" || !update.conversationId.trim() || update.conversationId.length > 512) pushError(errors, path, "requires an existing conversationId");
+      if (typeof update.chatTitle !== "string" || !update.chatTitle.trim() || update.chatTitle.length > 1000) pushError(errors, path, "requires a bounded chatTitle");
+      if (!isIsoTimestamp(update.capturedAt)) pushError(errors, path, "requires capturedAt");
+      let sourceMetadata;
+      try { sourceMetadata = validateSourceMetadata(update.sourceMetadata, update, capture, true); }
+      catch (error) { pushError(errors, `${path}.sourceMetadata`, error.message); }
+      return {conversationId: update.conversationId?.trim?.(), chatTitle: update.chatTitle?.trim?.(), capturedAt: update.capturedAt, sourceMetadata};
+    });
+  }
   if (errors.length) return { ok: false, errors };
   return {
     ok: true,
@@ -235,7 +265,8 @@ export function validateCaptureBatch(payload) {
         gapBefore: payload.coverage.gapBefore,
         backfillAvailable: payload.coverage.backfillAvailable
       } : null,
-      events
+      events,
+      ...(conversationUpdates ? { conversationUpdates } : {})
     }
   };
 }

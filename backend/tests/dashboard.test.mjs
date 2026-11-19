@@ -38,9 +38,8 @@ test("dashboard metrics are derived from stored activity without invented values
   ]);
   assert.deepEqual(result.platformToolPairs[0], { platform: "web", tool: "chatgpt", count: 2 });
   assert.deepEqual(result.useCases[0], { name: "Design", count: 2, tools: [{ tool: "chatgpt", count: 2 }] });
-  assert.equal(result.retrieval.total, 2);
+  assert.equal(result.retrieval.total, 1);
   assert.deepEqual(result.retrieval.byTool, [
-    { tool: "chatgpt", count: 1 },
     { tool: "claude", count: 1 }
   ]);
   assert.equal(result.retrieval.mostUsedMemories.some((item) => item.type === "claim"), false);
@@ -71,7 +70,7 @@ test("dashboard route returns the authenticated workspace's live aggregates", as
     if (url.pathname === "/rest/v1/checkpoints") return Response.json(checkpoints);
     if (url.pathname === "/rest/v1/retrieval_requests") return Response.json(retrievalRequests);
     if (url.pathname === "/rest/v1/memory_notes") return Response.json([]);
-    if (url.pathname === "/rest/v1/text_chunks") return Response.json([]);
+    if (url.pathname === "/rest/v1/text_chunks") return Response.json([{ id: "chunk-1", conversation_id: "conversation-3", content: "An invented current memory." }]);
     throw new Error(`Unexpected URL: ${input}`);
   };
   const request = new Request(`https://ingestion.example/v1/dashboard?workspaceId=${WORKSPACE_ID}`, {
@@ -87,4 +86,40 @@ test("dashboard route returns the authenticated workspace's live aggregates", as
   assert.equal(calls.some((call) => call.pathname === "/rest/v1/memory_claims"), false);
   assert.equal(calls.some((call) => call.pathname === "/rest/v1/retrieval_requests" && call.searchParams.get("provider") === "neq.web_test"), true);
   assert.equal(calls.some((call) => call.pathname === "/rest/v1/text_chunks" && call.searchParams.get("id") === "in.(chunk-1)"), true);
+});
+
+test("deleted memories cannot remain in current-memory Dashboard rankings or lookup counts",()=>{
+  const result=buildDashboardMetrics({retrievalRequests:[
+    {provider:'claude',result_refs:[{type:'excerpt',id:'removed-chunk'},{type:'summary',id:'removed-summary'}]},
+    {provider:'chatgpt',result_refs:[{type:'note',id:'removed-note'},{type:'claim',id:'retired-claim'}]}
+  ]});
+  assert.equal(result.retrieval.total,0);
+  assert.deepEqual(result.retrieval.byTool,[]);
+  assert.deepEqual(result.retrieval.mostUsedMemories,[]);
+});
+
+test("a mixed lookup counts only its retained sources once",()=>{
+  const result=buildDashboardMetrics({notes:[{id:'kept-note',title:'An invented preference'}],retrievalRequests:[
+    {provider:'claude',result_refs:[{type:'excerpt',id:'removed-chunk'},{type:'note',id:'kept-note'},{type:'note',id:'kept-note'}]},
+    {provider:'chatgpt',result_refs:[{type:'excerpt',id:'removed-chunk'}]}
+  ]});
+  assert.equal(result.retrieval.total,1);
+  assert.deepEqual(result.retrieval.byTool,[{tool:'claude',count:1}]);
+  assert.deepEqual(result.retrieval.mostUsedMemories.map(x=>({id:x.id,count:x.count})),[{id:'kept-note',count:1}]);
+});
+
+test('deleted popular excerpts cannot displace an existing lower-frequency memory',async()=>{
+ const old=Array.from({length:5},(_,i)=>({type:'excerpt',id:`old-${i}`}));
+ const requests=[...old.map(ref=>({provider:'chatgpt',result_refs:[ref,ref]})),{provider:'claude',result_refs:[{type:'excerpt',id:'kept'}]}];
+ const fetch=async input=>{const u=new URL(input),path=u.pathname;
+  if(path==='/auth/v1/user')return Response.json({id:USER_ID});
+  if(path.endsWith('/workspaces'))return Response.json([{id:WORKSPACE_ID}]);
+  if(path.endsWith('/conversations'))return Response.json([conversations[0]]);
+  if(path.endsWith('/checkpoints')||path.endsWith('/memory_notes'))return Response.json([]);
+  if(path.endsWith('/retrieval_requests'))return Response.json(requests);
+  if(path.endsWith('/text_chunks'))return Response.json(u.searchParams.get('id')?.includes('kept')?[{id:'kept',conversation_id:'conversation-1',content:'An invented current memory'}]:[]);
+  throw new Error('Unexpected read');
+ };
+ const r=await handleRequest(new Request(`https://ingestion.example/v1/dashboard?workspaceId=${WORKSPACE_ID}`,{headers:{authorization:'Bearer test'}}),configuredEnv(new MemoryR2()),{fetch});
+ assert.equal(r.status,200);const body=await r.json();assert.equal(body.retrieval.total,1);assert.equal(body.retrieval.mostUsedMemories[0].id,'kept');
 });

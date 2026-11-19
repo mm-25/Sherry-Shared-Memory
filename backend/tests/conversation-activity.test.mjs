@@ -85,6 +85,29 @@ test("conversation list orders imported chats by source activity", async () => {
   assert.equal("source_activity" in conversations[1], false);
 });
 
+test("conversation list includes chats beyond the database's first 1,000 rows", async () => {
+  const offsets = [];
+  const fetch = async (url) => {
+    if (url.endsWith("/auth/v1/user")) return Response.json({ id: USER_ID });
+    if (url.includes("/rest/v1/workspaces?")) return Response.json([{ id: WORKSPACE_ID }]);
+    if (url.includes("/rest/v1/conversations?")) {
+      const offset = Number(new URL(url).searchParams.get("offset"));
+      offsets.push(offset);
+      return Response.json(offset === 0
+        ? Array.from({ length: 1000 }, (_, index) => ({ id: `chat-${index}`, last_captured_at: "2026-09-24T12:00:00Z" }))
+        : [{ id: "chat-1000", last_captured_at: "2026-09-24T12:00:00Z" }]);
+    }
+    if (url.includes("/rest/v1/rpc/conversation_activity_rollup")) return Response.json([]);
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+  const response = await handleRequest(new Request(`https://ingestion.example/v1/conversations?workspaceId=${WORKSPACE_ID}`, {
+    headers: { authorization: "Bearer user-session-token" }
+  }), configuredEnv(new MemoryR2()), { fetch });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).conversations.length, 1001);
+  assert.deepEqual(offsets, [0, 1000]);
+});
+
 test("conversation detail orders by first capture and does not invent a transcript gap", async () => {
   const chatId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const fetch = async (url) => {
@@ -105,4 +128,30 @@ test("conversation detail orders by first capture and does not invent a transcri
   assert.deepEqual(conversation.events.map((event) => event.id), [1, 2]);
   assert.equal(conversation.transcriptCoverage.reasons.length, 0);
   assert.equal(conversation.last_activity_at, "2026-09-24T12:01:00.000Z");
+});
+
+test("conversation detail includes messages beyond the database's first 1,000 rows", async () => {
+  const chatId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const offsets = [];
+  const fetch = async (url) => {
+    if (url.endsWith("/auth/v1/user")) return Response.json({ id: USER_ID });
+    if (url.includes("/rest/v1/workspaces?")) return Response.json([{ id: WORKSPACE_ID }]);
+    if (url.includes("/rest/v1/conversations?")) return Response.json([{ id: chatId, last_captured_at: "2026-09-24T12:00:00Z" }]);
+    if (url.includes("/rest/v1/conversation_events?")) {
+      const offset = Number(new URL(url).searchParams.get("offset"));
+      offsets.push(offset);
+      return Response.json(offset === 0
+        ? Array.from({ length: 1000 }, (_, index) => ({ id: index + 1, role: "user", text_content: `message-${index}`, first_captured_at: "2026-09-24T12:00:00Z" }))
+        : [{ id: 1001, role: "assistant", text_content: "message-1000", first_captured_at: "2026-09-24T12:01:00Z" }]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+  const response = await handleRequest(new Request(`https://ingestion.example/v1/conversations/${chatId}?workspaceId=${WORKSPACE_ID}`, {
+    headers: { authorization: "Bearer user-session-token" }
+  }), configuredEnv(new MemoryR2()), { fetch });
+  assert.equal(response.status, 200);
+  const { conversation } = await response.json();
+  assert.equal(conversation.events.length, 1001);
+  assert.equal(conversation.events.at(-1).text_content, "message-1000");
+  assert.deepEqual(offsets, [0, 1000]);
 });

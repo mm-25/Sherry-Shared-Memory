@@ -2,7 +2,7 @@
 **/.DS_Store
 
 # Local dependencies, generated builds, and tool state
-**/node_modules/
+**/node_modules
 **/dist/
 **/.wrangler/
 **/.temp/
@@ -19,7 +19,10 @@ backend/worker-configuration.d.ts
 
 # Personal project records and unrelated local artifacts
 logs/
+planning/product-flow-map/.review-comments.json
 audits/
+# Recoverable superseded documentation includes private local logs/audits.
+archive/documentation/
 outputs/
 .codex-build-crossville-slide/
 .codex-finalizer/

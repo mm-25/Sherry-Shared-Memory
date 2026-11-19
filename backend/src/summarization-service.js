@@ -1,3 +1,4 @@
+import { captureEvidenceFor } from "./capture-evidence.js";
 import { selectCheckpointInput } from "./checkpoints.js";
 import { decryptSecret } from "./crypto.js";
 import { SummarizerGatewayError, summarizeCheckpoint } from "./summarizer-gateway.js";
@@ -114,7 +115,7 @@ async function loadJobInput(job, env, fetchImpl) {
       fetchImpl
     ),
     supabaseJson(
-      `conversation_events?workspace_id=eq.${encodeURIComponent(job.workspace_id)}&conversation_id=eq.${encodeURIComponent(job.conversation_id)}&id=in.(${eventPath(ids)})&select=id,role,text_content,revision,captured_at,last_captured_at&order=id.asc`,
+      `conversation_events?workspace_id=eq.${encodeURIComponent(job.workspace_id)}&conversation_id=eq.${encodeURIComponent(job.conversation_id)}&id=in.(${eventPath(ids)})&select=id,role,text_content,sequence,revision,message_timestamp,captured_at,last_captured_at,source_locator,coverage_state,capture_evidence&order=id.asc`,
       env,
       fetchImpl
     ),
@@ -150,7 +151,11 @@ async function loadJobInput(job, env, fetchImpl) {
       role: event.role,
       text: event.text_content,
       revision: Number(event.revision),
-      capturedAt: event.last_captured_at || event.captured_at
+      capturedAt: event.last_captured_at || event.captured_at,
+      messageTimestamp: event.message_timestamp || null,
+      sequence: event.sequence,
+      coverage: event.coverage_state || "unknown",
+      captureEvidence: captureEvidenceFor(event)
     };
   };
   const secret = await decryptSecret({
@@ -300,12 +305,15 @@ function unchangedTerminalFailure(failure, selection, eventRevisions, settings) 
   if (Number.isFinite(failureAt) && Number.isFinite(settingsUpdatedAt) && settingsUpdatedAt > failureAt) {
     return false;
   }
+  if (failure.error_code === "provider_authentication_failed") {
+    return failure.provider === settings.provider && failure.model === settings.model;
+  }
   return sameList(failure.new_event_ids, selection.newEventIds)
     && sameList(failure.overlap_event_ids, selection.overlapEventIds)
     && JSON.stringify(failure.event_revisions || {}) === JSON.stringify(eventRevisions)
     && failure.provider === settings.provider
     && failure.model === settings.model
-    && (failure.error_code === "provider_authentication_failed" || failure.prompt_version === effectivePromptVersion(settings));
+    && failure.prompt_version === effectivePromptVersion(settings);
 }
 
 async function createJobForConversation(conversation, selectionState, settings, reason, force, now, env, fetchImpl) {
@@ -450,7 +458,7 @@ export async function runSummarizationCycle(options, env, dependencies = {}) {
       await supabaseJson(`summarizer_settings?workspace_id=eq.${encodeURIComponent(settings.workspace_id)}`, env, fetchImpl, {
         method: "PATCH",
         headers: { "content-type": "application/json", prefer: "return=minimal" },
-        body: JSON.stringify({ last_scheduled_at: now.toISOString(), updated_at: now.toISOString() })
+        body: JSON.stringify({ last_scheduled_at: now.toISOString() })
       });
     }
     if (results.length >= maxJobs) break;

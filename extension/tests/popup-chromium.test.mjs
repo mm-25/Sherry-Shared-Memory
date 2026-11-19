@@ -37,6 +37,7 @@ function runChromePopup(url) {
       }
     },
     permissions: {
+      getAll: async () => ({ origins: [new URL(url).origin + "/*"] }),
       request() { calls.push(["unexpected-permission-request"]); throw new Error("Required origin must not be requested"); }
     },
     scripting: {
@@ -51,15 +52,13 @@ async function settle() {
   for (let index = 0; index < 24; index += 1) await Promise.resolve();
 }
 
-test("Chromium callback messaging also repairs missing provider capture", async () => {
+test("Chromium popup waits for an explicit manual action before recovering a missing reader", async () => {
   const { nodes, calls } = runChromePopup("https://chatgpt.com/c/test");
   await settle();
-  assert.deepEqual(calls, [
-    ["message", "GET_CAPTURE_STATE"],
-    ["inject", ["/src/core.js", "/src/chatgpt-adapter.js"]],
-    ["message", "GET_CAPTURE_STATE"]
-  ]);
-  assert.match(nodes.get("#page-status").textContent, /Ready/);
+  assert.deepEqual(calls, [["message", "GET_CAPTURE_STATE"]]);
+  assert.match(nodes.get("#page-status").textContent, /has not started/);
+  await nodes.get("#capture-now").listeners.click();
+  assert.deepEqual(calls.find(([kind]) => kind === "inject"), ["inject", ["/src/core.js", "/src/chatgpt-adapter.js"]]);
 });
 
 test("Chromium reconnect uses its installed required Sherry permission", async () => {

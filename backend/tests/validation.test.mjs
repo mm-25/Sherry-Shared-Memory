@@ -34,6 +34,25 @@ test("accepts and normalizes Capture API v2 browser provenance", () => {
   assert.equal(result.value.events[0].sourceLocator, "web:chatgpt:conversation-123");
 });
 
+test("accepts periodic page rescans used to recover older Gemini turns", () => {
+  const original = validBatchV2();
+  const payload = validBatchV2({
+    provider: "gemini",
+    providerFamily: "google",
+    product: "gemini",
+    reason: "periodic_scan",
+    events: [{
+      ...original.events[0],
+      provider: "gemini",
+      sourceUrl: "https://gemini.google.com/app/conversation-123",
+      sourceLocator: "web:gemini:conversation-123"
+    }]
+  });
+  const result = validateCaptureBatch(payload);
+  assert.equal(result.ok, true);
+  assert.equal(result.value.reason, "periodic_scan");
+});
+
 test("rejects mismatched provider families and incomplete v2 capture clients", () => {
   const payload = validBatchV2({
     providerFamily: "google",

@@ -1,11 +1,11 @@
 {
   "name": "sherry-capture-extension",
-  "version": "0.4.12",
+  "version": "0.4.25",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check src/core.js && node --check src/sync-core.js && node --check src/chatgpt-adapter.js && node --check src/web-provider-adapter.js && node --check src/claude-adapter.js && node --check src/gemini-adapter.js && node --check src/sherry-bridge.js && node --check src/background.js && node --check src/popup.js && node --check src/diagnostics.js && node --check scripts/build-chromium.mjs",
+    "check": "node --check src/upload-receipt.js && node --check src/core.js && node --check src/sync-core.js && node --check src/chatgpt-adapter.js && node --check src/web-provider-adapter.js && node --check src/claude-adapter.js && node --check src/gemini-adapter.js && node --check src/tab-recovery.js && node --check src/sherry-bridge.js && node --check src/background.js && node --check src/popup.js && node --check src/diagnostics.js && node --check scripts/build-chromium.mjs",
     "build:firefox": "bash scripts/build-firefox.sh",
     "build:chromium": "node scripts/build-chromium.mjs"
   }

@@ -49,3 +49,24 @@ test("workspace export does not offer an incomplete download when one section fa
   await context.runExport();
   assert.equal(context.exportPayload, null);
 });
+
+test("workspace export reads a large chat list in bounded groups", async () => {
+  let active = 0;
+  let peak = 0;
+  const context = exportContext(async (path) => {
+    if (path.startsWith("/v1/conversations/")) {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      active -= 1;
+      return { conversation: { id: path.split("/")[3].split("?")[0] } };
+    }
+    if (path.startsWith("/v1/summaries")) return { summaries: [] };
+    if (path.startsWith("/v1/personal-memory")) return { entries: [], categories: [] };
+    throw new Error("Unexpected export request");
+  });
+  context.conversations = Array.from({ length: 14 }, (_, index) => ({ id: `chat-${index}` }));
+  await context.runExport();
+  assert.equal(context.exportPayload.conversations.length, 14);
+  assert.ok(peak <= 6);
+});
